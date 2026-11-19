@@ -71,15 +71,24 @@ async function applySchemaAndMigrations(client) {
 }
 
 async function main() {
-  const name = (await new Promise((resolve) => {
+  const recoveryMode = process.argv.includes("--recover");
+  const listMode = process.argv.includes("--list");
+  if (listMode) {
+    const { rows } = await pool.query("select name, email from admins where role = 'super_admin' order by email");
+    if (!rows.length) console.log("No Super Admin accounts were found.");
+    else rows.forEach((account) => console.log(`${account.name} <${account.email}>`));
+    return;
+  }
+  const prompt = (label) => new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question("Super Admin name: ", (answer) => { rl.close(); resolve(answer.trim()); });
-  }));
+    rl.question(label, (answer) => { rl.close(); resolve(answer.trim()); });
+  });
+  const name = recoveryMode ? null : await prompt("Super Admin name: ");
   const email = (await new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question("Super Admin email: ", (answer) => { rl.close(); resolve(answer.trim().toLowerCase()); });
   }));
-  if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("A name and valid email address are required.");
+  if ((!recoveryMode && !name) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("A name and valid email address are required.");
   const password = await hiddenPrompt("Initial password (input hidden): ");
   const confirmation = await hiddenPrompt("Confirm password (input hidden): ");
   if (password !== confirmation) throw new Error("Passwords do not match.");
@@ -90,6 +99,38 @@ async function main() {
   const client = await pool.connect();
   try {
     await client.query("select pg_advisory_lock(731024620)");
+    if (recoveryMode) {
+      await applySchemaAndMigrations(client);
+      const confirmationText = await prompt(`Type RESET ${email} to revoke its sign-in factors and reset the Super Admin password: `);
+      if (confirmationText !== `RESET ${email}`) throw new Error("Recovery cancelled; confirmation did not match.");
+      await client.query("begin");
+      try {
+        await client.query("select pg_advisory_xact_lock(731024620)");
+        const account = await client.query("select id from admins where email = $1 and role = 'super_admin' for update", [email]);
+        if (account.rowCount !== 1) throw new Error("Recovery requires exactly one Super Admin account with that email.");
+        const adminId = account.rows[0].id;
+        await client.query("delete from admin_passkeys where admin_id = $1", [adminId]);
+        await client.query("delete from admin_totp_recovery_codes where admin_id = $1", [adminId]);
+        await client.query("delete from admin_webauthn_challenges where admin_id = $1", [adminId]);
+        await client.query("delete from admin_totp_challenges where admin_id = $1", [adminId]);
+        await client.query("update auth_sessions set revoked_at = now() where admin_id = $1 and revoked_at is null", [adminId]);
+        await client.query(
+          "update admins set password_hash = $2, passkey_enrolled_at = null, totp_secret_ciphertext = null, totp_enabled_at = null, totp_last_counter = -1, updated_at = now() where id = $1",
+          [adminId, await hashPassword(password)],
+        );
+        await client.query(
+          "insert into security_audit_logs(admin_id, event_type, metadata) values ($1, 'admin.recovery_completed', $2::jsonb)",
+          [adminId, JSON.stringify({ source: "protected_cli", factors_revoked: true })],
+        );
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback").catch(() => {});
+        throw error;
+      }
+      console.log(`Recovered the Super Admin account for ${email}.`);
+      console.log("Start the API, sign in with the new password, then complete passkey and authenticator setup.");
+      return;
+    }
     const adminsTable = await client.query("select to_regclass('public.admins') as table_name");
     if (adminsTable.rows[0].table_name) {
       const existingSuperAdmin = await client.query("select id from admins where role = 'super_admin' limit 1");
@@ -128,12 +169,10 @@ async function main() {
   } finally {
     await client.query("select pg_advisory_unlock(731024620)").catch(() => {});
     client.release();
-    await pool.end();
   }
 }
 
 main().catch(async (error) => {
   console.error(error.message);
-  await pool.end();
   process.exitCode = 1;
-});
+}).finally(() => pool.end());

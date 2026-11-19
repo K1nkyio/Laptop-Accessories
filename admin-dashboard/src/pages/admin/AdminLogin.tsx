@@ -21,20 +21,24 @@ export default function AdminLogin() {
     setError("");
     setLoading(true);
 
-    const formData = new FormData(event.currentTarget);
-
     try {
+      const form = event.currentTarget;
+      const emailInput = form.elements.namedItem("email") as HTMLInputElement | null;
+      const passwordInput = form.elements.namedItem("password") as HTMLInputElement | null;
       const input = {
-        email: String(formData.get("email") ?? ""),
-        password: String(formData.get("password") ?? ""),
+        email: emailInput?.value.trim() ?? "",
+        password: passwordInput?.value ?? "",
       };
-      const auth = await loginAdmin(input);
+      if (passwordInput) passwordInput.value = "";
+      const loginRequest = loginAdmin(input);
+      input.password = "";
+      const auth = await loginRequest;
       if (auth.mfaRequired && auth.challenge) {
         setMfaChallenge(auth.challenge);
         return;
       }
       storeAdminAuth(auth);
-      if (auth.needsPasskeyEnrollment) {
+      if (auth.needsSecurityEnrollment || auth.needsPasskeyEnrollment) {
         navigate("/admin/enroll", { replace: true });
         return;
       }
@@ -54,6 +58,10 @@ export default function AdminLogin() {
       const response = await startAuthentication({ optionsJSON: options });
       const auth = await verifyAdminPasskeyLogin({ email, challengeId, response });
       storeAdminAuth(auth);
+      if (auth.needsSecurityEnrollment) {
+        navigate("/admin/enroll", { replace: true });
+        return;
+      }
       navigate("/admin", { replace: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Passkey sign in failed");

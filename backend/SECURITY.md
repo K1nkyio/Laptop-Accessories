@@ -13,7 +13,11 @@ npm.cmd run dev
 
 The backend uses the published Argon2 native prebuilds. Its local `.npmrc` skips dependency lifecycle scripts because this Windows workspace path contains `&`; this is compatible with the packaged Windows x64 prebuild used here.
 
-Provision a Super Admin from this folder with `npm.cmd run bootstrap:super-admin`. The command applies the schema and migrations, asks for account details, reads the password without echoing it, and refuses to proceed if a Super Admin already exists. If the email matches an existing regular admin, the CLI promotes that account and replaces its password; otherwise it creates the initial Super Admin. Do not pass passwords as command-line arguments. After provisioning, start the API and sign in at `/admin/login`; password sign-in opens a restricted 15-minute session used only to enroll a passkey. Normal admin API access remains blocked until enrollment finishes.
+Provision a Super Admin from this folder with `npm.cmd run bootstrap:super-admin`. Stop the API first. The command applies the schema and migrations, asks for account details, reads the password without echoing it, and refuses to proceed if a Super Admin already exists. If the email matches an existing regular admin, the CLI promotes that account and replaces its password; otherwise it creates the initial Super Admin. Do not pass passwords as command-line arguments.
+
+If the existing Super Admin credentials are unknown, list the local Super Admin identities with `npm.cmd run recover:super-admin -- --list`. Stop the API, then run `npm.cmd run recover:super-admin`. Enter the exact email of the existing Super Admin, choose a new password, and type the displayed `RESET <email>` confirmation. Recovery revokes all sessions and passkeys, removes TOTP and recovery codes, and requires the owner to enroll the passkey and authenticator again. It cannot create a new Super Admin or recover an account by email alone; local shell and database access are required. Then restart the API and sign in at `/admin/login`.
+
+First sign-in opens a restricted 15-minute onboarding session. Register a passkey, set up an authenticator app, verify its current code, and save the one-time recovery codes before continuing to the dashboard. Both factors are required for all normal admin API access. In Security, admins can update their name, email, and password after confirming the current password; other active sessions are revoked after a credential change.
 
 Generate the MFA encryption key locally with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` and store it as `ADMIN_MFA_ENCRYPTION_KEY` in the ignored backend `.env`. TOTP secrets are AES-256-GCM encrypted at rest. Back up this key in a managed secret store; losing it makes enrolled TOTP secrets unreadable, and key rotation/re-encryption tooling is not implemented. TOTP setup returns one-time recovery codes; save them securely because the server stores only their hashes.
 
@@ -36,19 +40,19 @@ The API applies numbered SQL migrations once at startup, after ensuring the exis
 
 - Public administrator registration is disabled. The CLI refuses bootstrap if a Super Admin already exists, so it cannot overwrite an existing Super Admin.
 - Passkey registration and authentication use SimpleWebAuthn with expiring, one-use database challenges, configured origin/RP ID checks, authenticator user verification, and signature-counter updates.
-- Admins without passkeys receive a 15-minute enrollment-only session. Middleware blocks dashboard and other admin APIs until a verified passkey is registered.
-- Passkeys are the primary login method. Password login can only enroll an account with no passkey, or begin a five-minute TOTP fallback challenge when TOTP is enabled.
+- Admins missing either required factor receive a 15-minute enrollment-only session. Middleware blocks dashboard and other admin APIs until both a passkey and authenticator app are verified.
+- Passkeys are the primary login method. Password login can begin a restricted factor-enrollment session, or a five-minute TOTP fallback challenge after both factors have been enrolled.
 - TOTP secrets are AES-256-GCM encrypted with a deployment-managed key. TOTP uses a 30-second window and prevents reuse of a time-step. Ten one-use recovery codes are shown once and stored as SHA-256 hashes.
-- Admins can list/remove passkeys (the last credential cannot be removed), configure TOTP, and revoke sessions. TOTP disable requires the account password.
+- Admins can list/remove passkeys (the last credential cannot be removed), review TOTP recovery-code status, revoke sessions, and update their own name, email, and password after current-password verification. Credential changes revoke other active sessions.
 
-Email verification, email-delivered password recovery, complete staff invitation lifecycle, Super Admin account recovery, step-up authentication for every sensitive operation, shared rate-limit storage, customer security screens, and a complete administrator audit browser remain pending. Automated unit checks cover TOTP primitives; migrations and actual browser authenticator flows still require disposable PostgreSQL and browser validation. Do not treat this implementation as a production security sign-off until those checks and deployment configuration are reviewed.
+Email verification, email-delivered password recovery, complete staff invitation lifecycle, step-up authentication for every sensitive operation, shared rate-limit storage, customer security screens, and a complete administrator audit browser remain pending. The local CLI recovery path requires shell and database access. Automated unit checks cover TOTP primitives; migrations and actual browser authenticator flows still require disposable PostgreSQL and browser validation. Do not treat this implementation as a production security sign-off until those checks and deployment configuration are reviewed.
 
 ## Manual authenticator verification
 
 Before production rollout, use a disposable PostgreSQL database and a browser/device with a real passkey authenticator:
 
-1. Run the protected bootstrap command, sign in with the initial password, and confirm only the enrollment page is reachable before registering a passkey.
+1. Run the protected bootstrap command, sign in with the initial password, and confirm only the onboarding page is reachable before registering a passkey and authenticator.
 2. Sign out, sign in with the passkey, and verify a bad response, wrong origin/RP ID, expired challenge, and replayed challenge are rejected.
 3. Add a second passkey; confirm the last passkey cannot be removed and that a removed key no longer authenticates.
 4. Configure TOTP, complete password-plus-TOTP sign-in, use one recovery code, then confirm that same code and a reused TOTP time-step fail.
-5. Disable TOTP with the wrong password and confirm rejection; then disable with the correct password and verify TOTP fallback no longer works.
+5. Change the admin email and password with the current password, confirm other sessions are revoked, and verify the new credentials work.

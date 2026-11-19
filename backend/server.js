@@ -360,11 +360,12 @@ function verifyAdminBearer(req, res, next) {
       return;
     }
 
-    query("select id, name, email, role, passkey_enrolled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [payload.sub]).then(({ rows }) => {
+    query("select id, name, email, role, passkey_enrolled_at, totp_enabled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [payload.sub]).then(({ rows }) => {
       if (!rows[0] || !rows[0].passkey_enrolled_at || !rows[0].has_passkey) {
         res.status(403).json({ error: "Passkey enrollment is required", code: "PASSKEY_ENROLLMENT_REQUIRED" });
         return;
       }
+      if (!rows[0].totp_enabled_at) { res.status(403).json({ error: "Authenticator setup is required", code: "TOTP_ENROLLMENT_REQUIRED" }); return; }
       req.admin = { ...payload, sub: rows[0].id, email: rows[0].email, role: rows[0].role, name: rows[0].name };
       next();
     }).catch(next);
@@ -389,11 +390,12 @@ function requireAdmin(req, res, next) {
       res.status(403).json({ error: "Complete passkey enrollment before using the dashboard", code: "PASSKEY_ENROLLMENT_REQUIRED" });
       return;
     }
-    const { rows } = await query("select id, name, email, role, passkey_enrolled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [session.id]);
+    const { rows } = await query("select id, name, email, role, passkey_enrolled_at, totp_enabled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [session.id]);
     if (!rows[0] || !rows[0].passkey_enrolled_at || !rows[0].has_passkey) {
       res.status(403).json({ error: "Passkey enrollment is required", code: "PASSKEY_ENROLLMENT_REQUIRED" });
       return;
     }
+    if (!rows[0].totp_enabled_at) { res.status(403).json({ error: "Authenticator setup is required", code: "TOTP_ENROLLMENT_REQUIRED" }); return; }
     if (!["admin", "super_admin"].includes(rows[0].role)) {
       res.status(403).json({ error: "Admin access required" });
       return;
@@ -424,6 +426,20 @@ function requirePasskeyRegistration(req, res, next) {
     return;
   }
   requireAdmin(req, res, next);
+}
+
+function requireSecurityEnrollment(req, res, next) {
+  const token = parseCookies(req)[adminCookieName];
+  if (!token) { res.status(401).json({ error: "Admin enrollment session required" }); return; }
+  loadAdminSession(token).then((session) => {
+    if (!session) { res.status(401).json({ error: "Admin enrollment session expired" }); return; }
+    if (session.admin_enrollment_only) {
+      req.admin = { sub: session.id, email: session.email, role: session.role, name: session.name, sessionId: session.session_id, enrollmentOnly: true };
+      next();
+      return;
+    }
+    requireAdmin(req, res, next);
+  }).catch(next);
 }
 
 function requireSuperAdmin(req, res, next) {
@@ -560,16 +576,10 @@ app.post("/api/admin/auth/login", rateLimitAuth, async (req, res, next) => {
       res.json({ mfaRequired: true, challenge: token, admin });
       return;
     }
-    if (adminRow.passkey_enrolled_at && adminRow.has_passkey) {
-      await writeSecurityEvent(req, "admin.password_login_blocked_passkey_required", { adminId: adminRow.id });
-      res.status(401).json({ error: "Use your passkey to sign in, or enable TOTP for password fallback" });
-      return;
-    }
-
     await createBrowserSession(req, res, { adminId: adminRow.id, adminEnrollmentOnly: true });
-    await writeSecurityEvent(req, "admin.passkey_enrollment_required", { adminId: adminRow.id });
+    await writeSecurityEvent(req, "admin.security_enrollment_required", { adminId: adminRow.id });
     clearAuthAttempts(req);
-    res.json({ admin, needsPasskeyEnrollment: true });
+    res.json({ admin, needsSecurityEnrollment: true });
   } catch (error) {
     next(error);
   }
@@ -631,10 +641,11 @@ app.post("/api/admin/auth/passkeys/login/verify", rateLimitAuth, async (req, res
     if (!verification.verified) { res.status(401).json({ error: "Passkey sign-in failed" }); return; }
     await query("update admin_passkeys set counter = $2, last_used_at = now() where id = $1", [passkey.id, verification.authenticationInfo.newCounter]);
     const admin = publicAdmin(adminRow);
-    await createBrowserSession(req, res, { adminId: admin.id });
+    const needsSecurityEnrollment = !adminRow.totp_enabled_at;
+    await createBrowserSession(req, res, { adminId: admin.id, adminEnrollmentOnly: needsSecurityEnrollment });
     await writeSecurityEvent(req, "admin.passkey_login_succeeded", { adminId: admin.id }, { passkeyId: passkey.id });
     clearAuthAttempts(req);
-    res.json(authResponse(req, { admin }, signAdminToken(admin)));
+    res.json(authResponse(req, { admin, needsSecurityEnrollment }, needsSecurityEnrollment ? undefined : signAdminToken(admin)));
   } catch (error) { next(error); }
 });
 
@@ -692,8 +703,8 @@ app.post("/api/admin/auth/passkeys/register/verify", rateLimitAuth, requirePassk
          values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
         [req.admin.sub, credential.id, Buffer.from(credential.publicKey), credential.counter, JSON.stringify(transports), credentialDeviceType, credentialBackedUp, name],
       );
-      await client.query("update admins set passkey_enrolled_at = coalesce(passkey_enrolled_at, now()) where id = $1", [req.admin.sub]);
-      if (req.admin.enrollmentOnly) {
+      const adminState = await client.query("update admins set passkey_enrolled_at = coalesce(passkey_enrolled_at, now()) where id = $1 returning totp_enabled_at", [req.admin.sub]);
+      if (req.admin.enrollmentOnly && adminState.rows[0]?.totp_enabled_at) {
         await client.query("update auth_sessions set admin_enrollment_only = false, expires_at = now() + interval '8 hours', idle_expires_at = now() + interval '30 minutes' where id = $1 and admin_id = $2 and revoked_at is null", [req.admin.sessionId, req.admin.sub]);
       }
       await client.query("commit");
@@ -734,7 +745,15 @@ app.delete("/api/admin/auth/passkeys/:id", requireAdmin, async (req, res, next) 
   } catch (error) { next(error); }
 });
 
-app.post("/api/admin/auth/totp/setup", requireAdmin, async (req, res, next) => {
+app.get("/api/admin/auth/enrollment/status", requireSecurityEnrollment, async (req, res, next) => {
+  try {
+    const { rows } = await query("select passkey_enrolled_at, totp_enabled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [req.admin.sub]);
+    if (!rows[0]) { res.status(404).json({ error: "Admin account not found" }); return; }
+    res.json({ passkeyEnrolled: Boolean(rows[0].passkey_enrolled_at && rows[0].has_passkey), totpEnabled: Boolean(rows[0].totp_enabled_at) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/totp/setup", requireSecurityEnrollment, async (req, res, next) => {
   try {
     const secret = randomTotpSecret();
     const ciphertext = encryptTotpSecret(secret);
@@ -748,7 +767,7 @@ app.post("/api/admin/auth/totp/setup", requireAdmin, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/admin/auth/totp/verify", rateLimitAuth, requireAdmin, async (req, res, next) => {
+app.post("/api/admin/auth/totp/verify", rateLimitAuth, requireSecurityEnrollment, async (req, res, next) => {
   try {
     const { rows } = await query("select totp_secret_ciphertext, totp_enabled_at from admins where id = $1", [req.admin.sub]);
     if (!rows[0]?.totp_secret_ciphertext || rows[0].totp_enabled_at) { res.status(400).json({ error: "Start TOTP setup before verifying a code" }); return; }
@@ -767,6 +786,9 @@ app.post("/api/admin/auth/totp/verify", rateLimitAuth, requireAdmin, async (req,
       }
       for (const code of codes) {
         await client.query("insert into admin_totp_recovery_codes(admin_id, code_hash) values ($1, $2)", [req.admin.sub, hashRecoveryCode(code)]);
+      }
+      if (req.admin.enrollmentOnly) {
+        await client.query("update auth_sessions set admin_enrollment_only = false, expires_at = now() + interval '8 hours', idle_expires_at = now() + interval '30 minutes' where id = $1 and admin_id = $2 and revoked_at is null", [req.admin.sessionId, req.admin.sub]);
       }
       await client.query("commit");
     } catch (error) { await client.query("rollback").catch(() => {}); throw error; }
@@ -824,21 +846,6 @@ app.post("/api/admin/auth/totp/fallback", rateLimitAuth, async (req, res, next) 
   } catch (error) { next(error); }
 });
 
-app.post("/api/admin/auth/totp/disable", rateLimitAuth, requireAdmin, async (req, res, next) => {
-  try {
-    const { rows } = await query("select password_hash from admins where id = $1", [req.admin.sub]);
-    if (!rows[0] || !(await verifyPassword(String(req.body.password ?? ""), rows[0].password_hash))) {
-      res.status(401).json({ error: "Current password is invalid" });
-      return;
-    }
-    await query("update admins set totp_secret_ciphertext = null, totp_enabled_at = null, totp_last_counter = -1 where id = $1", [req.admin.sub]);
-    await query("delete from admin_totp_recovery_codes where admin_id = $1", [req.admin.sub]);
-    await writeSecurityEvent(req, "admin.totp_disabled", { adminId: req.admin.sub });
-    clearAuthAttempts(req);
-    res.json({ ok: true });
-  } catch (error) { next(error); }
-});
-
 app.get("/api/admin/auth/me", requireAdmin, async (req, res, next) => {
   try {
     const { rows } = await query("select id, name, email, role, passkey_enrolled_at, totp_enabled_at from admins where id = $1", [req.admin.sub]);
@@ -849,6 +856,35 @@ app.get("/api/admin/auth/me", requireAdmin, async (req, res, next) => {
 
     res.json({ admin: { ...publicAdmin(rows[0]), passkeyEnrolled: Boolean(rows[0].passkey_enrolled_at), totpEnabled: Boolean(rows[0].totp_enabled_at) } });
   } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/admin/auth/credentials", rateLimitAuth, requireAdmin, async (req, res, next) => {
+  try {
+    if (!req.admin.sessionId) { res.status(401).json({ error: "Sign in again before changing account credentials" }); return; }
+    const name = String(req.body.name ?? "").trim().slice(0, 120);
+    const email = normalizeEmail(req.body.email);
+    const newPassword = String(req.body.newPassword ?? "");
+    const currentPassword = String(req.body.currentPassword ?? "");
+    if (!name || !validEmail(email)) { res.status(400).json({ error: "Enter a name and valid email address" }); return; }
+    if (newPassword && (newPassword.length < 14 || !/[a-z]/.test(newPassword) || !/[A-Z]/.test(newPassword) || !/\d/.test(newPassword))) {
+      res.status(400).json({ error: "Use a password of at least 14 characters with uppercase, lowercase, and a number" }); return;
+    }
+    const { rows } = await query("select password_hash from admins where id = $1", [req.admin.sub]);
+    if (!rows[0] || !currentPassword || !(await verifyPassword(currentPassword, rows[0].password_hash))) {
+      res.status(401).json({ error: "Current password is invalid" }); return;
+    }
+    const passwordHash = newPassword ? await hashPassword(newPassword) : rows[0].password_hash;
+    const updated = await query(
+      "update admins set name = $2, email = $3, password_hash = $4, updated_at = now() where id = $1 returning id, name, email, role",
+      [req.admin.sub, name, email, passwordHash],
+    );
+    await query("update auth_sessions set revoked_at = now() where admin_id = $1 and id <> $2 and revoked_at is null", [req.admin.sub, req.admin.sessionId]);
+    await writeSecurityEvent(req, "admin.credentials_changed", { adminId: req.admin.sub }, { nameChanged: true, emailChanged: email !== req.admin.email, passwordChanged: Boolean(newPassword) });
+    res.json({ admin: publicAdmin(updated.rows[0]) });
+  } catch (error) {
+    if (error.code === "23505") { res.status(409).json({ error: "That email address is already assigned to an admin account" }); return; }
     next(error);
   }
 });
@@ -997,7 +1033,7 @@ app.post("/api/admin/auth/register", rateLimitAuth, requireSuperAdmin, async (re
     );
     const admin = publicAdmin(rows[0]);
     await writeSecurityEvent(req, "admin.registered", { adminId: admin.id }, { role });
-    res.status(201).json({ admin, requiresPasskeyEnrollment: true, message: "Account created. The new administrator must sign in and enroll a passkey before dashboard access." });
+    res.status(201).json({ admin, requiresPasskeyEnrollment: true, message: "Account created. The new administrator must sign in and enroll a passkey and authenticator before dashboard access." });
   } catch (error) {
     if (error.code === "23505") {
       res.status(409).json({ error: "An admin with that email already exists" });

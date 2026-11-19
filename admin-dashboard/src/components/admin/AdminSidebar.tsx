@@ -46,13 +46,13 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
           {!collapsed && (
             <div className="leading-none">
               <div className="text-[14px] font-semibold text-sidebar-accent-foreground">TechHub.ke</div>
-              <div className="text-[10px] uppercase tracking-[0.15em] text-muted-foreground mt-0.5">Admin</div>
+              <div className="mt-0.5 text-[10px] uppercase tracking-[0.15em] text-sidebar-foreground">Admin</div>
             </div>
           )}
         </div>
         <button
           onClick={() => setCollapsed((c) => !c)}
-          className="hidden md:flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+          className="hidden h-6 w-6 items-center justify-center rounded text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:flex"
           aria-label="Toggle sidebar"
         >
           <ChevronLeft className={cn("h-3.5 w-3.5 transition-transform", collapsed && "rotate-180")} />
@@ -60,9 +60,9 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
+      <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain px-2 py-3">
         {!collapsed && (
-          <div className="px-3 pt-1 pb-2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">
+          <div className="px-3 pb-2 pt-1 text-[10px] uppercase tracking-[0.12em] text-sidebar-foreground/75">
             Manage
           </div>
         )}
@@ -85,12 +85,12 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
               title={collapsed ? item.label : undefined}
             >
               {active && (
-                <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-primary" />
+                <span className="absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded-r bg-sidebar-primary" />
               )}
               <item.icon className="h-4 w-4 shrink-0" />
               {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
               {!collapsed && item.badge != null && (
-                <span className="text-[10px] font-semibold px-1.5 h-4 min-w-[16px] rounded-full bg-primary/15 text-primary flex items-center justify-center">
+                <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-sidebar-primary/20 px-1.5 text-[10px] font-semibold text-sidebar-primary">
                   {item.badge}
                 </span>
               )}
@@ -108,7 +108,7 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
             "flex items-center gap-3 px-3 h-9 rounded-md text-[13px] transition-colors",
             location.pathname.startsWith("/admin/security")
               ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
-              : "hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground text-muted-foreground"
+              : "text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
           )}
           title={collapsed ? "Security" : undefined}
         >
@@ -120,7 +120,7 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
           onClick={onNavigate}
           className={cn(
             "flex items-center gap-3 px-3 h-9 rounded-md text-[13px] transition-colors",
-            "hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground text-muted-foreground"
+            "text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
           )}
           title={collapsed ? "Settings" : undefined}
         >
@@ -135,7 +135,7 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
           }}
           className={cn(
             "flex items-center gap-3 px-3 h-9 rounded-md text-[13px] transition-colors",
-            "hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground text-muted-foreground"
+            "text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
           )}
           title={collapsed ? "Sign out" : undefined}
         >
@@ -145,12 +145,12 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
 
         {!collapsed && (
           <div className="mt-2 px-3 py-2.5 rounded-md bg-sidebar-accent/40 flex items-center gap-2.5">
-            <div className="h-7 w-7 rounded-full bg-primary/20 text-primary flex items-center justify-center text-[11px] font-semibold">
+            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-sidebar-primary/20 text-[11px] font-semibold text-sidebar-primary">
               AD
             </div>
             <div className="leading-tight min-w-0">
               <div className="text-[12px] text-sidebar-accent-foreground font-medium truncate">{admin?.name ?? "Admin User"}</div>
-              <div className="text-[10px] text-muted-foreground truncate">{admin?.email ?? "admin account"}</div>
+              <div className="truncate text-[10px] text-sidebar-foreground">{admin?.email ?? "admin account"}</div>
             </div>
           </div>
         )}

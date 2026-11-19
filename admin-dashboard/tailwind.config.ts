@@ -17,6 +17,7 @@ export default {
         brand: {
           blue: "#2563EB",
           cyan: "#06B6D4",
+          teal: "#0F766E",
           slate: "#0F172A",
           support: "#334155",
           cloud: "#F8FAFC",

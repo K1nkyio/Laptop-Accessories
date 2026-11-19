@@ -62,16 +62,16 @@ export default function AdminLayout() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-muted/30">
-      <div className="hidden h-screen shrink-0 md:block">
+    <div className="admin-shell fixed inset-0 flex h-dvh w-full overflow-hidden bg-background">
+      <div className="hidden h-full shrink-0 md:block">
         <AdminSidebar />
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="z-30 h-14 shrink-0 bg-background/85 backdrop-blur border-b border-border flex items-center px-4 gap-3">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-30 flex h-14 shrink-0 items-center gap-3 border-b border-sidebar-border bg-sidebar px-4 text-sidebar-foreground shadow-sm">
           <Sheet open={open} onOpenChange={setOpen}>
             <SheetTrigger asChild>
-              <Button variant="ghost" size="icon" className="md:hidden h-8 w-8">
+              <Button variant="ghost" size="icon" className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:hidden">
                 <Menu className="h-4 w-4" />
               </Button>
             </SheetTrigger>
@@ -81,17 +81,17 @@ export default function AdminLayout() {
           </Sheet>
 
           <div className="hidden sm:flex items-center gap-2 flex-1 max-w-md relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-sidebar-foreground" />
             <input
               placeholder="Search products, orders, customers..."
-              className="w-full h-9 pl-9 pr-3 rounded-md bg-muted text-[13px] outline-none focus:ring-1 focus:ring-primary"
+              className="h-9 w-full rounded-md border border-sidebar-border bg-sidebar-accent pl-9 pr-3 text-[13px] text-sidebar-accent-foreground outline-none placeholder:text-sidebar-foreground focus:ring-1 focus:ring-sidebar-ring"
             />
           </div>
 
           <div className="ml-auto flex items-center gap-2">
             <Popover>
               <PopoverTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-8 w-8 relative">
+                <Button variant="ghost" size="icon" className="relative h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground">
                   <Bell className="h-4 w-4" />
                   {notifications.length > 0 && (
                     <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
@@ -137,13 +137,13 @@ export default function AdminLayout() {
                 </div>
               </PopoverContent>
             </Popover>
-            <div className="h-8 w-8 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[11px] font-semibold">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-sidebar-primary/20 text-[11px] font-semibold text-sidebar-primary">
               AD
             </div>
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-5 md:p-7">
+        <main className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain bg-background p-5 md:p-7">
           <Outlet />
         </main>
       </div>

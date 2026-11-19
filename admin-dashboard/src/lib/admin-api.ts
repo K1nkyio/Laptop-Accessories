@@ -74,6 +74,7 @@ export interface AdminAuthResponse {
   admin: { id: string; name: string; email: string; role: string };
   token?: string;
   needsPasskeyEnrollment?: boolean;
+  needsSecurityEnrollment?: boolean;
   requiresPasskeyEnrollment?: boolean;
   mfaRequired?: boolean;
   challenge?: string;
@@ -208,6 +209,10 @@ export async function verifyAdminPasskeyRegistration(input: { challengeId: strin
   });
 }
 
+export async function fetchAdminEnrollmentStatus() {
+  return request<{ passkeyEnrolled: boolean; totpEnabled: boolean }>("/api/admin/auth/enrollment/status");
+}
+
 export async function fetchAdminPasskeys() {
   const data = await request<{ passkeys: AdminPasskey[] }>("/api/admin/auth/passkeys");
   return data.passkeys;
@@ -221,16 +226,19 @@ export async function setupAdminTotp() {
   return request<{ secret: string; otpauthUrl: string }>("/api/admin/auth/totp/setup", { method: "POST", body: JSON.stringify({}) });
 }
 
+export async function updateAdminCredentials(input: { name: string; email: string; currentPassword: string; newPassword?: string }) {
+  return request<{ admin: { id: string; name: string; email: string; role: string } }>("/api/admin/auth/credentials", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function verifyAdminTotp(code: string) {
   return request<{ enabled: true; recoveryCodes: string[] }>("/api/admin/auth/totp/verify", { method: "POST", body: JSON.stringify({ code }) });
 }
 
 export async function fetchAdminTotpStatus() {
   return request<{ enabled: boolean; recoveryCodesRemaining: number }>("/api/admin/auth/totp/status");
-}
-
-export async function disableAdminTotp(password: string) {
-  return request<{ ok: true }>("/api/admin/auth/totp/disable", { method: "POST", body: JSON.stringify({ password }) });
 }
 
 export async function registerAdmin(input: { name: string; email: string; password: string; role?: "admin" | "super_admin" }) {

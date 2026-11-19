@@ -10,6 +10,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "bootstrap:super-admin": "node scripts/bootstrap-super-admin.js",
+    "recover:super-admin": "node scripts/bootstrap-super-admin.js --recover",
     "test": "node --test"
   },
   "dependencies": {
