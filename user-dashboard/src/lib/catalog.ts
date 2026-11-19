@@ -70,6 +70,13 @@ const categories: CatalogCategory[] = [
     description: "Desk gear and carry essentials that make a setup simpler, tidier, and easier to move.",
     sortOrder: 4,
   },
+  { id: "cat-cameras", name: "Cameras", slug: "cameras", description: "Cameras and imaging equipment.", sortOrder: 5 },
+  { id: "cat-computers", name: "Desktop Computers", slug: "desktop-computers", description: "Business desktops and desktop bundles.", sortOrder: 6 },
+  { id: "cat-audio", name: "Audio", slug: "audio", description: "Portable speakers and headphones.", sortOrder: 7 },
+  { id: "cat-bags", name: "Bags", slug: "bags", description: "Laptop bags and everyday carry.", sortOrder: 8 },
+  { id: "cat-power", name: "Power & Chargers", slug: "power-chargers", description: "Laptop adapters and charging accessories.", sortOrder: 9 },
+  { id: "cat-cables", name: "Cables", slug: "cables", description: "Display and connectivity cables.", sortOrder: 10 },
+  { id: "cat-entertainment", name: "Entertainment", slug: "entertainment", description: "Streaming and home entertainment devices.", sortOrder: 11 },
 ];
 
 const subcategories: CatalogSubcategory[] = [

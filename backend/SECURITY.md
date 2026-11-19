@@ -25,6 +25,12 @@ For local WebAuthn, use `WEBAUTHN_RP_ID=localhost` and `WEBAUTHN_ORIGIN=http://l
 
 The API applies numbered SQL migrations once at startup, after ensuring the existing base schema. Migration failures stop API startup. The auth migrations add server-side sessions and security audit events; they do not rewrite or delete customer/admin accounts.
 
+## M-Pesa checkout (Daraja)
+
+Create a Daraja application in the [Safaricom developer portal](https://developer.safaricom.co.ke/apis/GettingStarted), then configure `MPESA_ENV=sandbox`, the consumer key/secret, shortcode, and passkey in the private backend `.env`. `MPESA_CALLBACK_URL` is the public HTTPS base URL of this API (for example, your deployed API origin); Safaricom must be able to reach it. Set `MPESA_CALLBACK_TOKEN` to a long random secret, for example `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Never expose Daraja credentials or this callback token in frontend variables. Switch to `MPESA_ENV=production` only after Safaricom production access has been approved and the live shortcode/passkey are configured.
+
+Checkout requires customer login and KES-priced products. The API recalculates item prices and stock from PostgreSQL, creates order/payment records, and sends an STK Push. The customer approves on their phone; the callback updates payment status and the status page polls the authenticated order endpoint. Localhost is not reachable by Safaricom, so use a temporary HTTPS tunnel only for sandbox callback development. Payment confirmation, callback delivery, reversals, refunds, and fulfillment still need monitoring and operator workflows before relying on this for production sales.
+
 ## Production requirements
 
 - Set `NODE_ENV=production`, use HTTPS, and set `CLIENT_ORIGIN` to the exact customer/admin origins that need the API.

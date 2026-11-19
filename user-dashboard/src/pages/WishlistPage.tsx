@@ -50,11 +50,11 @@ export default function WishlistPage() {
             <div className="mt-12 grid gap-px border border-border bg-border md:grid-cols-2 xl:grid-cols-3">
               {wishlist.map((item) => (
                 <article key={item.id} className="bg-background p-5">
-                  <Link to={`/product/${item.slug}`} className="block overflow-hidden border border-border bg-secondary/20">
+                  <Link to={`/product/${item.slug}`} className="flex items-center justify-center overflow-hidden border border-border bg-white p-3">
                     <img
                       src={getProductImage(item.slug, item.image_url)}
                       alt={item.name}
-                      className="aspect-square h-full w-full object-cover transition-transform duration-500 hover:scale-[1.02]"
+                      className="aspect-square h-full w-full object-contain transition-transform duration-300 hover:scale-[1.015]"
                     />
                   </Link>
 

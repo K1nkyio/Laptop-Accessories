@@ -1,6 +1,10 @@
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
+export function resolveAdminImageUrl(imageUrl: string | null | undefined) {
+  if (!imageUrl) return "";
+  return imageUrl.startsWith("/") ? new URL(imageUrl, API_URL).toString() : imageUrl;
+}
 const ADMIN_AUTH_STORAGE_KEY = "techhub-admin-auth";
 let legacyAdminToken: string | null = null;
 
@@ -42,10 +46,29 @@ export interface AdminInquiry {
   product_name: string;
   customer_name: string | null;
   customer_phone: string | null;
+  customer_email?: string | null;
   source: string;
   message: string;
   status: string;
   created_at: string;
+}
+
+export interface StoreProfileContent {
+  id: string; is_owner: boolean; name: string; designation: string; department: string; biography: string;
+  photo_url: string | null; skills: string[]; social_url: string | null; sort_order: number; is_featured: boolean; is_published: boolean;
+}
+export interface StoreFaqContent { id: string; category: string; question: string; answer: string; sort_order: number; is_published: boolean }
+export interface StoreLocationContent {
+  id: string; name: string; description: string; address: string; latitude: number | null; longitude: number | null;
+  phone: string; email: string; hours: string; services: string[]; sort_order: number; is_published: boolean;
+}
+export interface StoreStoryValue { title: string; description: string }
+export interface StoreManagedContent {
+  identity: { storeName: string; email: string; phone?: string; address: string; businessHours: string; whatsappNumber: string; description: string; website: string; linkedin: string };
+  story: { established: string; history: string; mission: string; vision: string; commitment: string; future: string; values: StoreStoryValue[] };
+  policies: { shipping: string; coverage: string; timelines: string; charges: string; tracking: string; pickup: string; returns: string; refunds: string; warranty: string; damaged: string };
+  settings: StoreSettings;
+  profiles: StoreProfileContent[]; faqs: StoreFaqContent[]; locations: StoreLocationContent[];
 }
 
 export interface AdminNotification {
@@ -409,4 +432,44 @@ export async function updateAdminReview(id: string, input: { status?: string; is
 export async function fetchAdminNotifications() {
   const data = await request<{ notifications: AdminNotification[] }>("/api/admin/notifications");
   return data.notifications;
+}
+
+export async function fetchManagedStoreContent() {
+  return request<StoreManagedContent>("/api/admin/store-content");
+}
+export async function saveManagedStoreContent(input: Pick<StoreManagedContent, "identity" | "story" | "policies">) {
+  return request<StoreManagedContent>("/api/admin/store-content", { method: "PUT", body: JSON.stringify(input) });
+}
+export async function saveOwnerProfile(input: Partial<StoreProfileContent> & { photoUrl?: string; socialUrl?: string; isPublished?: boolean }) {
+  return request<{ profile: StoreProfileContent }>("/api/admin/store-content/owner", { method: "PUT", body: JSON.stringify({ ...input, photoUrl: storeImageValue(input.photo_url ?? input.photoUrl ?? ""), socialUrl: input.social_url ?? input.socialUrl ?? "", isPublished: input.is_published ?? input.isPublished ?? false }) });
+}
+function storeImageValue(value: string) {
+  try { const candidate = new URL(value, API_URL); if (candidate.origin === new URL(API_URL).origin && candidate.pathname.startsWith("/uploads/")) return candidate.pathname; } catch { /* Keep external value for backend validation. */ }
+  return value;
+}
+function profilePayload(input: Partial<StoreProfileContent>) {
+  return { ...input, photoUrl: storeImageValue(input.photo_url ?? ""), socialUrl: input.social_url ?? "", sortOrder: input.sort_order ?? 0, isFeatured: input.is_featured ?? false, isPublished: input.is_published ?? false };
+}
+export async function createTeamProfile(input: Partial<StoreProfileContent>) {
+  return request<{ profile: StoreProfileContent }>("/api/admin/store-content/team", { method: "POST", body: JSON.stringify(profilePayload(input)) });
+}
+export async function updateTeamProfile(id: string, input: Partial<StoreProfileContent>) {
+  return request<{ profile: StoreProfileContent }>(`/api/admin/store-content/team/${id}`, { method: "PATCH", body: JSON.stringify(profilePayload(input)) });
+}
+export async function deleteTeamProfile(id: string) {
+  return request<{ ok: true }>(`/api/admin/store-content/team/${id}`, { method: "DELETE" });
+}
+export async function saveFaq(input: Partial<StoreFaqContent> & { id?: string }) {
+  const { id, ...body } = input;
+  return request<{ faq: StoreFaqContent }>(id ? `/api/admin/store-content/faqs/${id}` : "/api/admin/store-content/faqs", { method: id ? "PATCH" : "POST", body: JSON.stringify({ ...body, sortOrder: body.sort_order ?? 0, isPublished: body.is_published ?? false }) });
+}
+export async function deleteFaq(id: string) {
+  return request<{ ok: true }>(`/api/admin/store-content/faqs/${id}`, { method: "DELETE" });
+}
+export async function saveStoreLocation(input: Partial<StoreLocationContent> & { id?: string }) {
+  const { id, ...body } = input;
+  return request<{ location: StoreLocationContent }>(id ? `/api/admin/store-content/locations/${id}` : "/api/admin/store-content/locations", { method: id ? "PATCH" : "POST", body: JSON.stringify({ ...body, sortOrder: body.sort_order ?? 0, isPublished: body.is_published ?? false }) });
+}
+export async function deleteStoreLocation(id: string) {
+  return request<{ ok: true }>(`/api/admin/store-content/locations/${id}`, { method: "DELETE" });
 }

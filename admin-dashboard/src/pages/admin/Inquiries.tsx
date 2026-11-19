@@ -7,19 +7,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { cn } from "@/lib/utils";
 import { fetchAdminInquiries, updateAdminInquiry, type AdminInquiry } from "../../lib/admin-api";
 
-type Status = "all" | "new" | "contacted" | "completed";
+type Status = "all" | "new" | "in_progress" | "resolved";
 
 const tabs: { id: Status; label: string }[] = [
   { id: "all", label: "All" },
   { id: "new", label: "New" },
-  { id: "contacted", label: "Contacted" },
-  { id: "completed", label: "Completed" },
+  { id: "in_progress", label: "In progress" },
+  { id: "resolved", label: "Resolved" },
 ];
 
 const statusStyles: Record<string, string> = {
   new: "bg-warning/10 text-warning",
-  contacted: "bg-info/10 text-info",
-  completed: "bg-success/10 text-success",
+  in_progress: "bg-info/10 text-info",
+  resolved: "bg-success/10 text-success",
 };
 
 function phoneHref(phone: string | null | undefined) {
@@ -74,7 +74,8 @@ export default function Inquiries() {
           inquiry.product_name.toLowerCase().includes(value) ||
           inquiry.message.toLowerCase().includes(value) ||
           (inquiry.customer_name ?? "").toLowerCase().includes(value) ||
-          (inquiry.customer_phone ?? "").toLowerCase().includes(value);
+          (inquiry.customer_phone ?? "").toLowerCase().includes(value) ||
+          (inquiry.customer_email ?? "").toLowerCase().includes(value);
         return matchesTab && matchesSource && matchesSearch;
       })
       .sort((a, b) => {
@@ -90,14 +91,14 @@ export default function Inquiries() {
   };
 
   const markContacted = (inquiry: AdminInquiry) => {
-    if (inquiry.status === "new") void mark(inquiry.id, "contacted");
+    if (inquiry.status === "new") void mark(inquiry.id, "in_progress");
   };
 
   return (
     <div className="max-w-[1300px] space-y-5">
       <div>
         <h1 className="text-[24px] font-semibold tracking-tight">Inquiries</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">Customer leads from product pages and WhatsApp handoffs.</p>
+        <p className="mt-1 text-[13px] text-muted-foreground">Customer care messages, product questions, and WhatsApp handoffs.</p>
       </div>
 
       {error && (
@@ -141,7 +142,7 @@ export default function Inquiries() {
               <SelectItem value="all">All sources</SelectItem>
               <SelectItem value="delivery">Delivery</SelectItem>
               <SelectItem value="whatsapp">WhatsApp</SelectItem>
-              <SelectItem value="contact">Contact</SelectItem>
+              <SelectItem value="customer-care">Customer care</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -173,7 +174,7 @@ export default function Inquiries() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[14px] font-medium">{inquiry.customer_name || "Unnamed lead"}</span>
                   <span className={`inline-flex h-5 items-center rounded-full px-2 text-[10px] font-medium capitalize ${statusStyles[inquiry.status] ?? statusStyles.new}`}>
-                    {inquiry.status}
+                  {inquiry.status === "in_progress" ? "In progress" : inquiry.status === "resolved" ? "Resolved" : "New"}
                   </span>
                   {inquiry.source === "delivery" && (
                     <span className="inline-flex h-5 items-center gap-1 rounded-full bg-destructive/10 px-2 text-[10px] font-medium text-destructive">
@@ -183,7 +184,7 @@ export default function Inquiries() {
                   <span className="ml-auto text-[11px] text-muted-foreground">{new Date(inquiry.created_at).toLocaleString()}</span>
                 </div>
                 <div className="mt-0.5 text-[12px] text-muted-foreground">
-                  {inquiry.customer_phone || "No phone"} · interested in <span className="font-medium text-foreground">{inquiry.product_name}</span>
+                  {inquiry.customer_phone || "No phone"}{inquiry.customer_email ? ` · ${inquiry.customer_email}` : ""} · interested in <span className="font-medium text-foreground">{inquiry.product_name}</span>
                 </div>
                 <p className="mt-2 text-[13px] leading-relaxed text-foreground/85">{inquiry.message}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -209,9 +210,9 @@ export default function Inquiries() {
                       <MessageCircle className="h-3.5 w-3.5" /> WhatsApp
                     </a>
                   </Button>
-                  {inquiry.status !== "completed" && (
-                    <Button size="sm" variant="ghost" className="h-8 text-muted-foreground" onClick={() => void mark(inquiry.id, inquiry.status === "new" ? "contacted" : "completed")}>
-                      Mark as {inquiry.status === "new" ? "contacted" : "completed"}
+                  {inquiry.status !== "resolved" && (
+                    <Button size="sm" variant="ghost" className="h-8 text-muted-foreground" onClick={() => void mark(inquiry.id, inquiry.status === "new" ? "in_progress" : "resolved")}>
+                      Mark as {inquiry.status === "new" ? "in progress" : "resolved"}
                     </Button>
                   )}
                 </div>

@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { ArrowRight, BadgeCheck, MessageCircle, Truck } from "lucide-react";
+import { ArrowRight, BadgeCheck, MessageCircle, Truck, Laptop, Headphones, Monitor, CreditCard } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 
@@ -92,7 +92,7 @@ const Landing = () => {
               </div>
             </div>
 
-            <div className="pointer-events-none relative z-[1] hidden min-w-0 md:block">
+            <div className="pointer-events-none relative z-[1] min-w-0">
               <HeroShowcase />
             </div>
           </div>
@@ -140,6 +140,36 @@ const Landing = () => {
         </div>
       </section>
       ) : null}
+
+      <section className="relative z-10 border-y border-border bg-card/45 px-6 py-20">
+        <div className="mx-auto grid max-w-[1200px] gap-12 lg:grid-cols-[0.8fr_1.2fr] lg:items-start">
+          <div>
+            <p className="mb-4 text-xs uppercase tracking-[.16em] text-primary">Choose by setup</p>
+            <h2 className="text-3xl leading-tight tracking-[-.04em] text-foreground sm:text-4xl">Build a setup that fits the way you work.</h2>
+            <p className="mt-5 max-w-md text-sm leading-7 text-muted-foreground">Start with the device you use most, then add only the pieces that make your day easier. Browse by category or ask the team to help compare options.</p>
+            <Link to="/shop" className="mt-6 inline-flex items-center gap-2 text-sm font-medium text-primary">Explore all products <ArrowRight className="h-4 w-4" /></Link>
+          </div>
+          <div className="grid gap-px border border-border bg-border sm:grid-cols-2">
+            {[
+              { title: "Laptops", text: "Portable computers for study, office work, creative tasks, and everyday use.", icon: Laptop, to: "/shop/laptops" },
+              { title: "Audio", text: "Headphones and speakers for calls, focus, travel, and listening at home.", icon: Headphones, to: "/shop/audio" },
+              { title: "Workspace", text: "Displays and desk essentials that make a home or office setup more comfortable.", icon: Monitor, to: "/shop/monitors" },
+              { title: "Accessories", text: "Adapters, hubs, chargers, and useful add-ons for your devices.", icon: BadgeCheck, to: "/shop/accessories" },
+            ].map(({ title, text, icon: Icon, to }) => <Link key={title} to={to} className="group bg-background p-6 transition-colors hover:bg-primary/[.04]"><Icon className="h-5 w-5 text-primary" /><h3 className="mt-5 font-medium text-foreground">{title}</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">{text}</p><span className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-foreground">Browse category <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-1" /></span></Link>)}
+          </div>
+        </div>
+      </section>
+
+      <section className="relative z-10 px-6 py-20">
+        <div className="mx-auto max-w-[1200px]">
+          <p className="mb-4 text-xs uppercase tracking-[.16em] text-primary">A simple way to shop</p>
+          <h2 className="max-w-xl text-3xl tracking-[-.04em] text-foreground sm:text-4xl">From shortlist to your door.</h2>
+          <div className="mt-10 grid gap-8 border-t border-border pt-7 md:grid-cols-3">
+            {[{n:"01",title:"Find your fit",body:"Compare product details and choose the device or accessory that suits your needs."},{n:"02",title:"Review your order",body:"Add your delivery or pickup details and check the order summary before payment."},{n:"03",title:"Pay securely",body:"For M-Pesa, request an STK prompt and approve it on your phone. We confirm the order when Safaricom reports success.",icon:CreditCard}].map((step)=><article key={step.n}><span className="text-xs font-semibold tracking-[.14em] text-primary">{step.n}</span><h3 className="mt-4 text-lg font-medium text-foreground">{step.title}</h3><p className="mt-3 max-w-sm text-sm leading-7 text-muted-foreground">{step.body}</p></article>)}
+          </div>
+          <div className="mt-10 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-card p-6"><div><h3 className="font-medium text-foreground">Need a second opinion?</h3><p className="mt-1 text-sm text-muted-foreground">Contact us with the kind of work you do and the products you are considering.</p></div><Link to="/contact" className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-3 text-sm font-medium text-primary-foreground">Talk to the team <ArrowRight className="h-4 w-4" /></Link></div>
+        </div>
+      </section>
 
       <div className="relative z-10 w-full border-t border-border" />
 

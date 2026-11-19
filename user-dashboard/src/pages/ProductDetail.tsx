@@ -355,7 +355,7 @@ const ProductDetail = () => {
                             alt={`${product.name} ${item.label}`}
                             width={200}
                             height={200}
-                            className={`h-full w-full object-cover ${item.position}`}
+                            className="h-full w-full object-contain"
                           />
                         </div>
                         <div className="mt-2 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">

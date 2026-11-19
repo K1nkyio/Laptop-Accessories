@@ -9,11 +9,12 @@ import Landing from "./pages/Landing";
 import Shop from "./pages/Shop";
 import ProductDetail from "./pages/ProductDetail";
 import NotFound from "./pages/NotFound";
-import InfoPage from "./pages/InfoPage";
+import { CustomerCarePage, ManagedPolicyPage, OurStoryPage, StoreLocatorPage } from "./pages/AboutPages";
 import AuthPage from "./pages/AuthPage";
 import CartPage from "./pages/CartPage";
 import WishlistPage from "./pages/WishlistPage";
 import CheckoutPage from "./pages/CheckoutPage";
+import PaymentStatusPage from "./pages/PaymentStatusPage";
 import CheckInPage from "./pages/CheckInPage";
 import AdminLayout from "@admin-dashboard/components/admin/AdminLayout";
 import AdminLogin from "@admin-dashboard/pages/admin/AdminLogin";
@@ -24,6 +25,7 @@ import Inquiries from "@admin-dashboard/pages/admin/Inquiries";
 import Inventory from "@admin-dashboard/pages/admin/Inventory";
 import Reviews from "@admin-dashboard/pages/admin/Reviews";
 import Settings from "@admin-dashboard/pages/admin/Settings";
+import StoreContent from "@admin-dashboard/pages/admin/StoreContent";
 
 const queryClient = new QueryClient();
 
@@ -36,12 +38,15 @@ const App = () => (
         <BrowserRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
           <Routes>
             <Route path="/" element={<Landing />} />
-            <Route path="/about" element={<InfoPage page="about" />} />
-            <Route path="/stores" element={<InfoPage page="stores" />} />
-            <Route path="/contact" element={<InfoPage page="contact" />} />
-            <Route path="/shipping" element={<InfoPage page="shipping" />} />
-            <Route path="/returns" element={<InfoPage page="returns" />} />
-            <Route path="/warranty" element={<InfoPage page="warranty" />} />
+            <Route path="/about" element={<Navigate to="/our-story" replace />} />
+            <Route path="/customer-care" element={<CustomerCarePage />} />
+            <Route path="/our-story" element={<OurStoryPage />} />
+            <Route path="/store-locator" element={<StoreLocatorPage />} />
+            <Route path="/stores" element={<Navigate to="/store-locator" replace />} />
+            <Route path="/contact" element={<Navigate to="/customer-care" replace />} />
+            <Route path="/shipping" element={<ManagedPolicyPage kind="shipping" />} />
+            <Route path="/returns" element={<ManagedPolicyPage kind="returns" />} />
+            <Route path="/warranty" element={<ManagedPolicyPage kind="warranty" />} />
             <Route path="/sign-in" element={<AuthPage mode="sign-in" />} />
             <Route path="/sign-up" element={<AuthPage mode="sign-up" />} />
             <Route path="/shop" element={<Shop />} />
@@ -52,6 +57,7 @@ const App = () => (
             <Route path="/wishlist" element={<WishlistPage />} />
             <Route path="/check-in" element={<CheckInPage />} />
             <Route path="/checkout" element={<CheckoutPage />} />
+            <Route path="/payment-status/:orderId" element={<PaymentStatusPage />} />
             <Route path="/admin/sign-in" element={<Navigate to="/admin/login" replace />} />
             <Route path="/admin/login" element={<AdminLogin />} />
             <Route path="/admin" element={<AdminLayout />}>
@@ -63,6 +69,7 @@ const App = () => (
               <Route path="inventory" element={<Inventory />} />
               <Route path="reviews" element={<Reviews />} />
               <Route path="settings" element={<Settings />} />
+              <Route path="store-content" element={<StoreContent />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

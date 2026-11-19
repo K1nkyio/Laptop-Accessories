@@ -1,14 +1,13 @@
 import { FormEvent, useState } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowRight, CheckCircle2, CreditCard, ShieldCheck, Smartphone, Truck } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { ArrowRight, CheckCircle2, ShieldCheck, Smartphone, Truck } from "lucide-react";
 import type { InputHTMLAttributes } from "react";
 import { toast } from "sonner";
 
 import { StoreFooter } from "@/components/StoreFooter";
 import { StoreNav } from "@/components/StoreNav";
 import { Button } from "@/components/ui/button";
-import { clearCart, useStorefront } from "@/hooks/use-storefront";
+import { useStorefront } from "@/hooks/use-storefront";
 import { apiRequest } from "@/lib/api";
 import { getStoredAuth } from "@/lib/auth";
 import { formatPrice } from "@/lib/products";
@@ -21,8 +20,6 @@ export default function CheckoutPage() {
   const [searchParams] = useSearchParams();
   const mode = searchParams.get("mode") === "pickup" ? "pickup" : "delivery";
 
-  const [paymentMethod, setPaymentMethod] = useState<"mpesa" | "card">("mpesa");
-
   const [form, setForm] = useState({
     fullName: "",
     email: "",
@@ -31,21 +28,13 @@ export default function CheckoutPage() {
     address: "",
     notes: "",
   });
-  const [paymentForm, setPaymentForm] = useState({
-    mpesaPhone: "",
-    mpesaName: "",
-    cardName: "",
-    cardNumber: "",
-    cardExpiry: "",
-    cardCvv: "",
-  });
-
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const shipping = cart.length > 0 ? 25 : 0;
+  const shipping = cart.length > 0 && mode === "delivery" ? 25 : 0;
   const total = subtotal + shipping;
   const currency = cart[0]?.currency ?? "USD";
 
   const [submitting, setSubmitting] = useState(false);
+  const [paymentPhone, setPaymentPhone] = useState("");
 
   if (!auth) {
     return <Navigate to="/sign-in" replace state={{ redirectTo: "/checkout" }} />;
@@ -58,37 +47,16 @@ export default function CheckoutPage() {
 
     setSubmitting(true);
     try {
-      const productSummary = cart.map((item) => `${item.name} x${item.quantity}`).join(", ");
-      const message = [
-        `${mode === "pickup" ? "Pickup reservation" : "Delivery request"} for: ${productSummary}.`,
-        `Customer: ${form.fullName}`,
-        `Email: ${form.email}`,
-        `Phone: ${form.phone}`,
-        mode === "delivery" ? `City: ${form.city}` : null,
-        mode === "delivery" ? `Address: ${form.address}` : null,
-        form.notes ? `Notes: ${form.notes}` : "",
-        paymentMethod === "mpesa" ? `Payment: M-Pesa (${paymentForm.mpesaPhone}, ${paymentForm.mpesaName})` : null,
-        paymentMethod === "card" ? `Payment: Card ending ${paymentForm.cardNumber.slice(-4)} (${paymentForm.cardName})` : null,
-        `Order total: ${currency} ${total.toLocaleString()}`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-      await apiRequest("/api/inquiries", {
+      const result = await apiRequest<{ orderId: string; message: string }>("/api/payments/mpesa/stk-push", {
         method: "POST",
         body: JSON.stringify({
-          productId: cart[0]?.id,
-          productName: productSummary,
-          customerName: form.fullName,
-          customerPhone: form.phone,
-          source: mode === "pickup" ? "pickup" : "delivery",
-          message,
+          items: cart.map(({ id, quantity }) => ({ id, quantity })),
+          fulfillmentMethod: mode,
+          customer: { name: form.fullName, email: form.email, phone: form.phone, mpesaPhone: paymentPhone || form.phone, city: form.city, address: form.address, notes: form.notes },
         }),
       });
-
-      clearCart();
-      toast(mode === "pickup" ? "Pickup reserved. Our team will follow up." : "Delivery request sent. Our team will follow up shortly.");
-      navigate("/shop");
+      toast.success(result.message);
+      navigate(`/payment-status/${result.orderId}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not send delivery request.");
     } finally {
@@ -211,64 +179,18 @@ export default function CheckoutPage() {
                   <fieldset className="mt-6">
                     <legend className="sr-only">Payment method</legend>
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <PaymentOption
-                        icon={Smartphone}
-                        label="M-Pesa"
-                        description="Use the phone number that will receive the payment prompt later."
-                        checked={paymentMethod === "mpesa"}
-                        onChange={() => setPaymentMethod("mpesa")}
-                      />
-                      <PaymentOption
-                        icon={CreditCard}
-                        label="Card"
-                        description="Add card details now; processing will be connected later."
-                        checked={paymentMethod === "card"}
-                        onChange={() => setPaymentMethod("card")}
-                      />
+                      <div className="sm:col-span-2"><PaymentOption label="M-Pesa STK Push" description="Safaricom will send a secure payment prompt to your phone. Your M-Pesa PIN is entered on your phone, never on this site." /></div>
                     </div>
                   </fieldset>
 
-                  {paymentMethod === "mpesa" ? (
                     <div className="mt-5 grid gap-4 sm:grid-cols-2">
                       <Field
                         label="M-Pesa phone"
                         type="tel"
-                        value={paymentForm.mpesaPhone}
-                        onChange={(value) => setPaymentForm((current) => ({ ...current, mpesaPhone: value }))}
-                      />
-                      <Field
-                        label="Account name"
-                        value={paymentForm.mpesaName}
-                        onChange={(value) => setPaymentForm((current) => ({ ...current, mpesaName: value }))}
+                        value={paymentPhone}
+                        onChange={setPaymentPhone}
                       />
                     </div>
-                  ) : (
-                    <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                      <Field
-                        label="Name on card"
-                        value={paymentForm.cardName}
-                        onChange={(value) => setPaymentForm((current) => ({ ...current, cardName: value }))}
-                      />
-                      <Field
-                        label="Card number"
-                        inputMode="numeric"
-                        value={paymentForm.cardNumber}
-                        onChange={(value) => setPaymentForm((current) => ({ ...current, cardNumber: value }))}
-                      />
-                      <Field
-                        label="Expiry"
-                        placeholder="MM/YY"
-                        value={paymentForm.cardExpiry}
-                        onChange={(value) => setPaymentForm((current) => ({ ...current, cardExpiry: value }))}
-                      />
-                      <Field
-                        label="CVV"
-                        inputMode="numeric"
-                        value={paymentForm.cardCvv}
-                        onChange={(value) => setPaymentForm((current) => ({ ...current, cardCvv: value }))}
-                      />
-                    </div>
-                  )}
                 </section>
               </form>
 
@@ -322,11 +244,11 @@ export default function CheckoutPage() {
                   disabled={submitting}
                   className="mt-6 h-12 w-full rounded-none text-[13px] uppercase tracking-[0.12em]"
                 >
-                  {submitting ? "Sending request..." : "Place order request"}
+                  {submitting ? "Requesting payment..." : "Pay with M-Pesa"}
                 </Button>
 
                 <p className="mt-4 text-[12px] leading-6 text-muted-foreground">
-                  This page now captures the checkout flow. Final payment processing can be connected next without redesigning the layout.
+                  We verify the order price on the server. Your order is confirmed after Safaricom reports the payment.
                 </p>
               </aside>
             </div>
@@ -373,28 +295,21 @@ function Field({
 }
 
 function PaymentOption({
-  icon: Icon,
   label,
   description,
-  checked,
-  onChange,
 }: {
-  icon: LucideIcon;
   label: string;
   description: string;
-  checked: boolean;
-  onChange: () => void;
 }) {
   return (
-    <label className={`flex min-h-[112px] cursor-pointer gap-3 rounded-xl border p-4 transition-colors ${checked ? "border-primary bg-primary/5 text-foreground ring-1 ring-primary/30" : "border-border bg-background hover:border-primary/40"}`}>
-      <input type="radio" name="payment" checked={checked} onChange={onChange} className="sr-only" />
-      <Icon className="mt-0.5 h-5 w-5 shrink-0" />
+    <div className="flex min-h-[90px] gap-3 rounded-xl border border-primary bg-primary/5 p-4 text-foreground ring-1 ring-primary/30">
+      <Smartphone className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
       <span>
         <span className="block text-[14px] font-medium">{label}</span>
-        <span className={`mt-2 block text-[12px] leading-5 ${checked ? "text-background/75" : "text-muted-foreground"}`}>
+        <span className="mt-2 block text-[12px] leading-5 text-muted-foreground">
           {description}
         </span>
       </span>
-    </label>
+    </div>
   );
 }

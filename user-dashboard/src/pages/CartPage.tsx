@@ -59,11 +59,11 @@ export default function CartPage() {
                     key={item.id}
                     className="grid gap-6 bg-background p-5 sm:grid-cols-[120px_minmax(0,1fr)_110px]"
                   >
-                    <Link to={`/product/${item.slug}`} className="overflow-hidden border border-border bg-secondary/20">
+                    <Link to={`/product/${item.slug}`} className="flex items-center justify-center overflow-hidden border border-border bg-white p-2">
                       <img
                         src={getProductImage(item.slug, item.image_url)}
                         alt={item.name}
-                        className="aspect-square h-full w-full object-cover"
+                        className="aspect-square h-full w-full object-contain"
                       />
                     </Link>
 

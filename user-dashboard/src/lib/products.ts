@@ -10,6 +10,7 @@ import keyboard from "@/assets/product-keyboard.jpg";
 import dock1 from "@/assets/product-dock-1.jpg";
 import dock2 from "@/assets/product-dock-2.jpg";
 import bag from "@/assets/product-bag.jpg";
+import { API_URL } from "@/lib/api";
 
 // Generic per-category fallback pool (cycled by hash of slug)
 const FALLBACK_POOL = [laptop1, laptop2, laptop3, laptop4, mouse1, mouse2, keyboard, dock1, dock2, bag];
@@ -37,14 +38,17 @@ function hashSlug(slug: string): number {
 
 export function getProductImage(slug: string, fallback?: string | null): string {
   if (SLUG_IMAGE_MAP[slug]) return SLUG_IMAGE_MAP[slug];
-  if (fallback) return fallback;
+  if (fallback) {
+    return fallback.startsWith("/") ? new URL(fallback, API_URL).toString() : fallback;
+  }
   return FALLBACK_POOL[hashSlug(slug) % FALLBACK_POOL.length];
 }
 
 export function formatPrice(price: number, currency = "USD"): string {
-  return new Intl.NumberFormat("en-US", {
+  const currencyCode = currency === "KSh" ? "KES" : currency;
+  return new Intl.NumberFormat(currencyCode === "KES" ? "en-KE" : "en-US", {
     style: "currency",
-    currency,
+    currency: currencyCode,
     maximumFractionDigits: 0,
   }).format(price);
 }

@@ -31,16 +31,28 @@ const webauthnRpId = process.env.WEBAUTHN_RP_ID ?? "localhost";
 const webauthnOrigin = process.env.WEBAUTHN_ORIGIN ?? "http://localhost:8080";
 const uploadDir = path.join(__dirname, "uploads");
 fs.mkdirSync(uploadDir, { recursive: true });
+const imageExtensions = new Map([
+  ["image/jpeg", ".jpg"],
+  ["image/png", ".png"],
+  ["image/webp", ".webp"],
+  ["image/gif", ".gif"],
+  ["image/avif", ".avif"],
+]);
 const upload = multer({
-  dest: uploadDir,
+  storage: multer.diskStorage({
+    destination: uploadDir,
+    filename(_req, file, callback) {
+      callback(null, `${crypto.randomUUID()}${imageExtensions.get(file.mimetype)}`);
+    },
+  }),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter(_req, file, callback) {
-    if (file.mimetype.startsWith("image/")) {
+    if (imageExtensions.has(file.mimetype)) {
       callback(null, true);
       return;
     }
 
-    callback(new Error("Only image uploads are allowed"));
+    callback(new Error("Upload a JPEG, PNG, WebP, GIF, or AVIF image."));
   },
 });
 
@@ -68,6 +80,29 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN ?? "http://localhost:8080,http
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+
+let mpesaAccessToken = "";
+let mpesaTokenExpiresAt = 0;
+const mpesaBaseUrl = process.env.MPESA_ENV === "production" ? "https://api.safaricom.co.ke" : "https://sandbox.safaricom.co.ke";
+function normalizeMpesaPhone(value) {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  const normalized = digits.startsWith("0") ? `254${digits.slice(1)}` : digits.startsWith("254") ? digits : `254${digits}`;
+  return /^254(?:7|1)\d{8}$/.test(normalized) ? normalized : null;
+}
+async function getMpesaAccessToken() {
+  if (mpesaAccessToken && Date.now() < mpesaTokenExpiresAt) return mpesaAccessToken;
+  const key = process.env.MPESA_CONSUMER_KEY;
+  const secret = process.env.MPESA_CONSUMER_SECRET;
+  if (!key || !secret) throw new Error("M-Pesa is not configured. Add Daraja credentials to the backend environment.");
+  const response = await fetch(`${mpesaBaseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${key}:${secret}`).toString("base64")}` },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.access_token) throw new Error("Could not authenticate with M-Pesa.");
+  mpesaAccessToken = data.access_token;
+  mpesaTokenExpiresAt = Date.now() + Math.max(30, Number(data.expires_in ?? 3599) - 60) * 1000;
+  return mpesaAccessToken;
+}
 
 app.disable("x-powered-by");
 if (trustProxyHops > 0) app.set("trust proxy", trustProxyHops);
@@ -970,6 +1005,25 @@ app.get("/api/settings", async (_req, res, next) => {
   }
 });
 
+async function readStoreContent(adminView = false) {
+  const [contentRows, profiles, faqs, locations, settings] = await Promise.all([
+    query("select content_key, content from store_content"),
+    query(`select id, is_owner, name, designation, department, biography, photo_url, skills, social_url, sort_order, is_featured, is_published from store_profiles ${adminView ? "" : "where is_published = true"} order by is_owner desc, is_featured desc, sort_order, created_at`),
+    query(`select id, category, question, answer, sort_order, is_published from store_faqs ${adminView ? "" : "where is_published = true"} order by category, sort_order, created_at`),
+    query(`select id, name, description, address, latitude, longitude, phone, email, hours, services, sort_order, is_published from store_locations ${adminView ? "" : "where is_published = true"} order by sort_order, created_at`),
+    query("select value from store_settings where key='storefront'"),
+  ]);
+  const sections = Object.fromEntries(contentRows.rows.map((row) => [row.content_key, row.content]));
+  const storefront = settingPayload(settings.rows[0]);
+  const identity = { ...(sections.identity ?? {}), storeName: sections.identity?.storeName || storefront.storeName, phone: sections.identity?.phone ?? storefront.supportPhone, whatsappNumber: sections.identity?.whatsappNumber ?? storefront.whatsappNumber };
+  const normalizedLocations = locations.rows.map((location) => ({ ...location, latitude: location.latitude === null ? null : Number(location.latitude), longitude: location.longitude === null ? null : Number(location.longitude) }));
+  return { identity, story: sections.story ?? {}, policies: sections.policies ?? {}, profiles: profiles.rows, faqs: faqs.rows, locations: normalizedLocations, settings: storefront };
+}
+
+app.get("/api/store/content", async (_req, res, next) => {
+  try { res.json(await readStoreContent(false)); } catch (error) { next(error); }
+});
+
 app.patch("/api/admin/settings", requireSuperAdmin, async (req, res, next) => {
   try {
     const current = await query("select value from store_settings where key = 'storefront'");
@@ -1080,6 +1134,112 @@ app.use("/api/admin", (req, res, next) => {
 
   requireAdmin(req, res, next);
 });
+
+const cleanText = (value, max = 1000) => String(value ?? "").trim().slice(0, max);
+const validContentUrl = (value) => !value || /^https:\/\//i.test(String(value)) || /^\/uploads\/[\w./-]+$/.test(String(value));
+const validUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value));
+
+app.get("/api/admin/store-content", async (_req, res, next) => {
+  try { res.json(await readStoreContent(true)); } catch (error) { next(error); }
+});
+
+app.put("/api/admin/store-content", async (req, res, next) => {
+  const { identity = {}, story = {}, policies = {} } = req.body ?? {};
+  const identityData = {
+    email: cleanText(identity.email, 254), phone: cleanText(identity.phone, 32), address: cleanText(identity.address, 500), businessHours: cleanText(identity.businessHours, 500),
+    whatsappNumber: cleanText(identity.whatsappNumber, 24).replace(/\D/g, ""), description: cleanText(identity.description, 2000),
+    storeName: cleanText(identity.storeName, 120), website: cleanText(identity.website, 300), linkedin: cleanText(identity.linkedin, 300),
+  };
+  if (identityData.email && !validEmail(identityData.email)) return res.status(400).json({ error: "Enter a valid customer care email." });
+  if (identity.website && !validContentUrl(identity.website) || identity.linkedin && !validContentUrl(identity.linkedin)) return res.status(400).json({ error: "Social and website links must use HTTPS." });
+  const storyData = {
+    established: cleanText(story.established, 120), history: cleanText(story.history, 5000), mission: cleanText(story.mission, 2000),
+    vision: cleanText(story.vision, 2000), commitment: cleanText(story.commitment, 2000), future: cleanText(story.future, 2000),
+    values: Array.isArray(story.values) ? story.values.slice(0, 12).map((item) => ({ title: cleanText(item.title, 120), description: cleanText(item.description, 500) })).filter((item) => item.title && item.description) : [],
+  };
+  const policyKeys = ["shipping", "coverage", "timelines", "charges", "tracking", "pickup", "returns", "refunds", "warranty", "damaged"];
+  const policyData = Object.fromEntries(policyKeys.map((key) => [key, cleanText(policies[key], 3000)]));
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      for (const [key, value] of Object.entries({ identity: identityData, story: storyData, policies: policyData })) {
+        await client.query("insert into store_content(content_key,content,updated_at) values($1,$2,now()) on conflict(content_key) do update set content=excluded.content,updated_at=now()", [key, JSON.stringify(value)]);
+      }
+      await client.query(
+        "update store_settings set value = value || $1::jsonb, updated_at=now() where key='storefront'",
+        [JSON.stringify({ storeName: identityData.storeName || defaultStoreSettings.storeName, supportPhone: identityData.phone, whatsappNumber: identityData.whatsappNumber })],
+      );
+      await client.query("commit");
+    } catch (error) { await client.query("rollback"); throw error; } finally { client.release(); }
+    res.json(await readStoreContent(true));
+  } catch (error) { next(error); }
+});
+
+app.put("/api/admin/store-content/owner", async (req, res, next) => {
+  const data = req.body ?? {};
+  const name = cleanText(data.name, 160), designation = cleanText(data.designation, 120), photoUrl = cleanText(data.photoUrl, 500), socialUrl = cleanText(data.socialUrl, 300);
+  if (!name || !designation || !validContentUrl(photoUrl) || !validContentUrl(socialUrl)) return res.status(400).json({ error: "Owner name and designation are required; links must use HTTPS or a store upload." });
+  try {
+    const existing = await query("select id from store_profiles where is_owner=true limit 1");
+    const skills = Array.isArray(data.skills) ? data.skills.slice(0, 20).map((v) => cleanText(v, 80)).filter(Boolean) : [];
+    const values = [name, designation, cleanText(data.department,120), cleanText(data.biography,2000), photoUrl || null, skills, socialUrl || null, Number.isInteger(Number(data.sortOrder)) ? Number(data.sortOrder) : 0, Boolean(data.isPublished)];
+    const result = existing.rows[0]
+      ? await query("update store_profiles set name=$2,designation=$3,department=$4,biography=$5,photo_url=$6,skills=$7,social_url=$8,sort_order=$9,is_published=$10,updated_at=now() where id=$1 returning *", [existing.rows[0].id, ...values])
+      : await query("insert into store_profiles(is_owner,name,designation,department,biography,photo_url,skills,social_url,sort_order,is_featured,is_published) values(true,$1,$2,$3,$4,$5,$6,$7,$8,true,$9) returning *", values);
+    res.json({ profile: result.rows[0] });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/store-content/team", async (req, res, next) => {
+  const data = req.body ?? {};
+  const name = cleanText(data.name,160), designation = cleanText(data.designation,120), photoUrl = cleanText(data.photoUrl,500), socialUrl = cleanText(data.socialUrl,300);
+  if (!name || !designation || !validContentUrl(photoUrl) || !validContentUrl(socialUrl)) return res.status(400).json({ error: "Name and designation are required; links must use HTTPS or a store upload." });
+  try {
+    const { rows } = await query("insert into store_profiles(name,designation,department,biography,photo_url,skills,social_url,sort_order,is_featured,is_published) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *", [name, designation, cleanText(data.department,120), cleanText(data.biography,2000), photoUrl || null, Array.isArray(data.skills) ? data.skills.slice(0,20).map((v) => cleanText(v,80)).filter(Boolean) : [], socialUrl || null, Number(data.sortOrder) || 0, Boolean(data.isFeatured), Boolean(data.isPublished)]);
+    res.status(201).json({ profile: rows[0] });
+  } catch (error) { next(error); }
+});
+app.patch("/api/admin/store-content/team/:id", async (req, res, next) => {
+  if (!validUuid(req.params.id)) return res.status(400).json({ error: "Invalid profile id." });
+  const data = req.body ?? {};
+  const name = cleanText(data.name,160), designation = cleanText(data.designation,120), photoUrl = cleanText(data.photoUrl,500), socialUrl = cleanText(data.socialUrl,300);
+  if (!name || !designation || !validContentUrl(photoUrl) || !validContentUrl(socialUrl)) return res.status(400).json({ error: "Name and designation are required; links must use HTTPS or a store upload." });
+  try {
+    const { rows } = await query("update store_profiles set name=$2,designation=$3,department=$4,biography=$5,photo_url=$6,skills=$7,social_url=$8,sort_order=$9,is_featured=$10,is_published=$11,updated_at=now() where id=$1 and is_owner=false returning *", [req.params.id,name,designation,cleanText(data.department,120),cleanText(data.biography,2000),photoUrl||null,Array.isArray(data.skills)?data.skills.slice(0,20).map((v)=>cleanText(v,80)).filter(Boolean):[],socialUrl||null,Number(data.sortOrder)||0,Boolean(data.isFeatured),Boolean(data.isPublished)]);
+    if (!rows[0]) return res.status(404).json({ error: "Team profile not found." });
+    res.json({ profile: rows[0] });
+  } catch (error) { next(error); }
+});
+app.delete("/api/admin/store-content/team/:id", async (req, res, next) => {
+  if (!validUuid(req.params.id)) return res.status(400).json({ error: "Invalid profile id." });
+  try { const { rowCount } = await query("delete from store_profiles where id=$1 and is_owner=false", [req.params.id]); if (!rowCount) return res.status(404).json({ error: "Team profile not found." }); res.json({ ok: true }); } catch (error) { next(error); }
+});
+
+app.post("/api/admin/store-content/faqs", async (req, res, next) => {
+  const { category, question, answer } = req.body ?? {};
+  if (!cleanText(category,100) || !cleanText(question,300) || !cleanText(answer,3000)) return res.status(400).json({ error: "Category, question, and answer are required." });
+  try { const { rows } = await query("insert into store_faqs(category,question,answer,sort_order,is_published) values($1,$2,$3,$4,$5) returning *", [cleanText(category,100),cleanText(question,300),cleanText(answer,3000),Number(req.body.sortOrder)||0,Boolean(req.body.isPublished)]); res.status(201).json({ faq: rows[0] }); } catch (error) { next(error); }
+});
+app.patch("/api/admin/store-content/faqs/:id", async (req, res, next) => {
+  if (!validUuid(req.params.id)) return res.status(400).json({ error: "Invalid FAQ id." });
+  const { category, question, answer } = req.body ?? {};
+  if (!cleanText(category,100) || !cleanText(question,300) || !cleanText(answer,3000)) return res.status(400).json({ error: "Category, question, and answer are required." });
+  try { const { rows } = await query("update store_faqs set category=$2,question=$3,answer=$4,sort_order=$5,is_published=$6,updated_at=now() where id=$1 returning *", [req.params.id,cleanText(category,100),cleanText(question,300),cleanText(answer,3000),Number(req.body.sortOrder)||0,Boolean(req.body.isPublished)]); if (!rows[0]) return res.status(404).json({ error: "FAQ not found." }); res.json({ faq: rows[0] }); } catch (error) { next(error); }
+});
+app.delete("/api/admin/store-content/faqs/:id", async (req, res, next) => { if (!validUuid(req.params.id)) return res.status(400).json({ error: "Invalid FAQ id." }); try { const { rowCount } = await query("delete from store_faqs where id=$1", [req.params.id]); if (!rowCount) return res.status(404).json({ error: "FAQ not found." }); res.json({ ok: true }); } catch (error) { next(error); } });
+
+app.post("/api/admin/store-content/locations", async (req, res, next) => {
+  const d=req.body??{}, name=cleanText(d.name,120), address=cleanText(d.address,500), lat=d.latitude===""||d.latitude==null?null:Number(d.latitude), lng=d.longitude===""||d.longitude==null?null:Number(d.longitude);
+  if (!name||!address||((lat===null)!==(lng===null))||(lat!==null&&(!Number.isFinite(lat)||lat < -90||lat>90||!Number.isFinite(lng)||lng < -180||lng>180))) return res.status(400).json({error:"Provide a store name and address, and valid coordinate pairs if using coordinates."});
+  try { const {rows}=await query("insert into store_locations(name,description,address,latitude,longitude,phone,email,hours,services,sort_order,is_published) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *",[name,cleanText(d.description,1000),address,lat,lng,cleanText(d.phone,32),cleanText(d.email,254),cleanText(d.hours,500),Array.isArray(d.services)?d.services.slice(0,20).map(v=>cleanText(v,80)).filter(Boolean):[],Number(d.sortOrder)||0,Boolean(d.isPublished)]); res.status(201).json({location:rows[0]}); } catch(error){next(error);}
+});
+app.patch("/api/admin/store-content/locations/:id", async (req,res,next)=>{
+  if(!validUuid(req.params.id))return res.status(400).json({error:"Invalid location id."}); const d=req.body??{},name=cleanText(d.name,120),address=cleanText(d.address,500),lat=d.latitude===""||d.latitude==null?null:Number(d.latitude),lng=d.longitude===""||d.longitude==null?null:Number(d.longitude);
+  if(!name||!address||((lat===null)!==(lng===null))||(lat!==null&&(!Number.isFinite(lat)||lat < -90||lat>90||!Number.isFinite(lng)||lng < -180||lng>180)))return res.status(400).json({error:"Provide a store name and address, and valid coordinate pairs if using coordinates."});
+  try{const{rows}=await query("update store_locations set name=$2,description=$3,address=$4,latitude=$5,longitude=$6,phone=$7,email=$8,hours=$9,services=$10,sort_order=$11,is_published=$12,updated_at=now() where id=$1 returning *",[req.params.id,name,cleanText(d.description,1000),address,lat,lng,cleanText(d.phone,32),cleanText(d.email,254),cleanText(d.hours,500),Array.isArray(d.services)?d.services.slice(0,20).map(v=>cleanText(v,80)).filter(Boolean):[],Number(d.sortOrder)||0,Boolean(d.isPublished)]);if(!rows[0])return res.status(404).json({error:"Location not found."});res.json({location:rows[0]});}catch(error){next(error);}
+});
+app.delete("/api/admin/store-content/locations/:id",async(req,res,next)=>{if(!validUuid(req.params.id))return res.status(400).json({error:"Invalid location id."});try{const{rowCount}=await query("delete from store_locations where id=$1",[req.params.id]);if(!rowCount)return res.status(404).json({error:"Location not found."});res.json({ok:true});}catch(error){next(error);}});
 
 app.post("/api/admin/categories", async (req, res, next) => {
   try {
@@ -1487,7 +1647,7 @@ app.post("/api/admin/uploads", upload.single("image"), (req, res) => {
     return;
   }
 
-  const imageUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  const imageUrl = `/uploads/${req.file.filename}`;
   res.status(201).json({ imageUrl });
 });
 
@@ -1497,7 +1657,7 @@ app.get("/api/admin/notifications", async (_req, res, next) => {
       query(`
         select id, product_name, customer_name, customer_phone, message, created_at
         from inquiries
-        where source = 'delivery' and status <> 'completed'
+        where source = 'delivery' and status <> 'resolved'
         order by created_at desc
         limit 8
       `),
@@ -1626,7 +1786,8 @@ app.patch("/api/admin/reviews/:id", async (req, res, next) => {
 
 app.patch("/api/admin/inquiries/:id", async (req, res, next) => {
   try {
-    const status = String(req.body.status ?? "contacted").trim();
+    const status = String(req.body.status ?? "in_progress").trim();
+    if (!["new", "in_progress", "resolved"].includes(status)) return res.status(400).json({ error: "Inquiry status must be new, in progress, or resolved." });
     const { rows } = await query(
       "update inquiries set status = $2 where id = $1 returning *",
       [req.params.id, status],
@@ -1643,17 +1804,162 @@ app.patch("/api/admin/inquiries/:id", async (req, res, next) => {
   }
 });
 
-app.post("/api/inquiries", async (req, res, next) => {
+app.post("/api/payments/mpesa/stk-push", requireAuth, async (req, res, next) => {
+  let client;
   try {
-    const productName = String(req.body.productName ?? "").trim();
-    const message = String(req.body.message ?? "").trim();
+    const { items, customer, fulfillmentMethod } = req.body ?? {};
+    const phone = normalizeMpesaPhone(customer?.mpesaPhone);
+    if (!phone) return res.status(400).json({ error: "Enter a valid Kenyan M-Pesa number." });
+    if (!Array.isArray(items) || !items.length || items.length > 30) return res.status(400).json({ error: "Your cart is empty or invalid." });
+    if (!customer?.name || !customer?.email || !["pickup", "delivery"].includes(fulfillmentMethod)) return res.status(400).json({ error: "Complete your contact and fulfillment details." });
+    if (fulfillmentMethod === "delivery" && (!customer.address || !customer.city)) return res.status(400).json({ error: "Enter your delivery address and city." });
+    const shortcode = process.env.MPESA_SHORTCODE;
+    const passkey = process.env.MPESA_PASSKEY;
+    const callbackToken = process.env.MPESA_CALLBACK_TOKEN;
+    const callbackUrl = process.env.MPESA_CALLBACK_URL;
+    if (!shortcode || !passkey || !callbackToken || !callbackUrl || !process.env.MPESA_CONSUMER_KEY || !process.env.MPESA_CONSUMER_SECRET || !/^https:\/\//i.test(callbackUrl)) {
+      return res.status(503).json({ error: "M-Pesa checkout is not configured yet. Please contact the store." });
+    }
+    client = await pool.connect();
+    await client.query("begin");
+    const productIds = [...new Set(items.map((item) => String(item.id ?? "")))];
+    if (!productIds.length || productIds.some((id) => !id)) throw Object.assign(new Error("Invalid cart products."), { status: 400 });
+    const { rows: products } = await client.query("select id, name, price, discount_price, currency, stock, status from products where id = any($1::text[]) for update", [productIds]);
+    const qtyById = new Map();
+    for (const item of items) {
+      const quantity = Number(item.quantity);
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) throw Object.assign(new Error("Cart quantity is invalid."), { status: 400 });
+      const id = String(item.id);
+      qtyById.set(id, (qtyById.get(id) ?? 0) + quantity);
+    }
+    if (products.length !== productIds.length) throw Object.assign(new Error("A product in your cart is no longer available."), { status: 400 });
+    let subtotal = 0;
+    for (const product of products) {
+      const quantity = qtyById.get(product.id);
+      if (!(["KES", "KSh", "KSH"].includes(product.currency))) throw Object.assign(new Error("This cart contains an item not priced in Kenyan shillings. Please contact the store."), { status: 400 });
+      if (product.status !== "in_stock" || Number(product.stock) < quantity) throw Object.assign(new Error(`${product.name} does not have enough stock.`), { status: 409 });
+      subtotal += Number(product.discount_price || product.price) * quantity;
+    }
+    const shipping = fulfillmentMethod === "delivery" ? 25 : 0;
+    const total = Math.ceil(subtotal + shipping);
+    if (!Number.isSafeInteger(total) || total < 1) throw Object.assign(new Error("Order total is invalid."), { status: 400 });
+    const { rows: [order] } = await client.query(
+      `insert into orders (user_id, customer_name, customer_email, customer_phone, fulfillment_method, delivery_address, delivery_city, notes, subtotal, shipping, total)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id`,
+      [req.auth.sub, String(customer.name).slice(0,160), String(customer.email).slice(0,254), phone, fulfillmentMethod, customer.address || null, customer.city || null, String(customer.notes || "").slice(0,1000), subtotal, shipping, total],
+    );
+    for (const product of products) await client.query(
+      "insert into order_items (order_id, product_id, product_name, unit_price, quantity) values ($1,$2,$3,$4,$5)",
+      [order.id, product.id, product.name, Number(product.discount_price || product.price), qtyById.get(product.id)],
+    );
+    const { rows: [payment] } = await client.query(
+      "insert into mpesa_payments (order_id, phone, amount) values ($1,$2,$3) returning id",
+      [order.id, phone, total],
+    );
+    await client.query("commit");
+
+    const accessToken = await getMpesaAccessToken();
+    const dateParts = new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Nairobi", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
+    const timestamp = Object.fromEntries(dateParts.map(({ type, value }) => [type, value]));
+    const formattedTimestamp = `${timestamp.year}${timestamp.month}${timestamp.day}${timestamp.hour}${timestamp.minute}${timestamp.second}`;
+    const password = Buffer.from(`${shortcode}${passkey}${formattedTimestamp}`).toString("base64");
+    const callback = callbackUrl.replace(/\/$/, "") + `/api/payments/mpesa/callback/${encodeURIComponent(callbackToken)}`;
+    const stkResponse = await fetch(`${mpesaBaseUrl}/mpesa/stkpush/v1/processrequest`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ BusinessShortCode: shortcode, Password: password, Timestamp: formattedTimestamp, TransactionType: process.env.MPESA_TRANSACTION_TYPE || "CustomerPayBillOnline", Amount: total, PartyA: phone, PartyB: shortcode, PhoneNumber: phone, CallBackURL: callback, AccountReference: `TH-${order.id.slice(0,8)}`, TransactionDesc: "TechHub order" }),
+    });
+    const stk = await stkResponse.json().catch(() => ({}));
+    if (!stkResponse.ok || !stk.CheckoutRequestID) {
+      await query("update mpesa_payments set status='failed', result_description=$2, updated_at=now() where id=$1", [payment.id, String(stk.errorMessage || stk.ResponseDescription || "STK request rejected").slice(0,300)]);
+      await query("update orders set payment_status='failed', updated_at=now() where id=$1", [order.id]);
+      return res.status(502).json({ error: "Safaricom could not start the payment prompt. Please try again." });
+    }
+    await query("update mpesa_payments set merchant_request_id=$2, checkout_request_id=$3, status='pending', result_description=$4, updated_at=now() where id=$1", [payment.id, stk.MerchantRequestID || null, stk.CheckoutRequestID, stk.ResponseDescription || "STK prompt sent"]);
+    return res.status(202).json({ orderId: order.id, status: "pending", message: "Check your phone and enter your M-Pesa PIN to approve the payment." });
+  } catch (error) {
+    if (client) { try { await client.query("rollback"); } catch {} }
+    if (error?.status) return res.status(error.status).json({ error: error.message });
+    if (/M-Pesa is not configured/.test(String(error?.message))) return res.status(503).json({ error: error.message });
+    next(error);
+  } finally {
+    client?.release();
+  }
+});
+
+app.post("/api/payments/mpesa/callback/:token", async (req, res) => {
+  if (!process.env.MPESA_CALLBACK_TOKEN || req.params.token !== process.env.MPESA_CALLBACK_TOKEN) return res.sendStatus(404);
+  const result = req.body?.Body?.stkCallback;
+  if (!result?.CheckoutRequestID || !Number.isInteger(Number(result.ResultCode))) return res.sendStatus(400);
+  const metadata = Object.fromEntries((result.CallbackMetadata?.Item ?? []).map((item) => [item.Name, item.Value]));
+  const paid = Number(result.ResultCode) === 0;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const { rows } = await client.query("select id, order_id, amount, phone, status from mpesa_payments where checkout_request_id=$1 for update", [result.CheckoutRequestID]);
+    if (rows[0] && rows[0].status !== "paid" && rows[0].status !== "failed") {
+      const expectedPhone = rows[0].phone;
+      const callbackPhone = metadata.PhoneNumber ? String(metadata.PhoneNumber) : "";
+      const callbackAmount = metadata.Amount === undefined ? NaN : Number(metadata.Amount);
+      const receipt = String(metadata.MpesaReceiptNumber || "").trim();
+      const verified = callbackPhone === expectedPhone && callbackAmount === Number(rows[0].amount) && Boolean(receipt);
+      const finalPaid = paid && verified;
+      const failureDescription = !verified ? "Payment callback did not match order details" : String(result.ResultDesc || "Payment failed").slice(0,300);
+      await client.query(
+        "update mpesa_payments set status=$2, result_code=$3, result_description=$4, mpesa_receipt=$5, updated_at=now() where id=$1",
+        [rows[0].id, finalPaid ? "paid" : "failed", String(result.ResultCode), finalPaid ? "Payment confirmed" : failureDescription, finalPaid ? receipt.slice(0,32) : null],
+      );
+      await client.query("update orders set payment_status=$2, updated_at=now() where id=$1", [rows[0].order_id, finalPaid ? "paid" : "failed"]);
+    }
+    await client.query("commit");
+    res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    console.error("M-Pesa callback processing failed");
+    res.sendStatus(500);
+  } finally { client.release(); }
+});
+
+app.get("/api/payments/mpesa/orders/:orderId", requireAuth, async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `select o.id, o.payment_status, p.status as attempt_status, p.result_description, p.mpesa_receipt
+       from orders o left join lateral (select status, result_description, mpesa_receipt from mpesa_payments where order_id=o.id order by created_at desc limit 1) p on true
+       where o.id=$1 and o.user_id=$2`, [req.params.orderId, req.auth.sub],
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Order not found." });
+    res.json({ orderId: rows[0].id, status: rows[0].payment_status, receipt: rows[0].mpesa_receipt, message: rows[0].payment_status === "paid" ? "Payment received." : rows[0].payment_status === "failed" ? "Payment was not completed." : "Waiting for Safaricom to confirm your payment…" });
+  } catch (error) { next(error); }
+});
+
+const inquiryRateBuckets = new Map();
+function rateLimitInquiry(req, res, next) {
+  const now = Date.now(); const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
+  for (const [key, bucket] of inquiryRateBuckets) if (bucket.resetAt <= now) inquiryRateBuckets.delete(key);
+  let bucket = inquiryRateBuckets.get(ip);
+  if (bucket && bucket.count >= 6) { res.setHeader("Retry-After", String(Math.ceil((bucket.resetAt-now)/1000))); res.status(429).json({ error: "Too many messages were sent. Please try again later." }); return; }
+  if (!bucket) { bucket={count:0,resetAt:now+15*60*1000}; inquiryRateBuckets.set(ip,bucket); }
+  bucket.count += 1;
+  if (inquiryRateBuckets.size > 5000) inquiryRateBuckets.delete(inquiryRateBuckets.keys().next().value);
+  next();
+}
+app.post("/api/inquiries", rateLimitInquiry, async (req, res, next) => {
+  try {
+    if (String(req.body.website ?? "").trim()) { res.status(201).json({ inquiry: { id: null, status: "new" } }); return; }
+    const productName = String(req.body.productName ?? "").trim().slice(0, 160);
+    const message = String(req.body.message ?? "").trim().slice(0, 4000);
+    const customerEmail = String(req.body.customerEmail ?? "").trim().slice(0,254);
+    const customerName = String(req.body.customerName ?? "").trim().slice(0,160);
+    const customerPhone = String(req.body.customerPhone ?? "").trim().slice(0,32);
     const requestedProductId = String(req.body.productId ?? "").trim();
     let productId = null;
 
-    if (!productName || !message) {
-      res.status(400).json({ error: "Product name and message are required" });
+    if (!productName || message.length < 10) {
+      res.status(400).json({ error: "A subject and message of at least 10 characters are required." });
       return;
     }
+    if (customerEmail && !validEmail(customerEmail)) return res.status(400).json({ error: "Enter a valid email address." });
+    if (req.body.source === "customer-care" && (!customerName || !validEmail(customerEmail))) return res.status(400).json({ error: "Name and a valid email address are required for customer care messages." });
 
     if (requestedProductId) {
       const productLookup = await query("select id from products where id = $1", [requestedProductId]);
@@ -1662,17 +1968,18 @@ app.post("/api/inquiries", async (req, res, next) => {
 
     const { rows } = await query(
       `
-        insert into inquiries (product_id, product_name, customer_name, customer_phone, source, message)
-        values ($1, $2, $3, $4, $5, $6)
+        insert into inquiries (product_id, product_name, customer_name, customer_phone, source, message, customer_email)
+        values ($1, $2, $3, $4, $5, $6, $7)
         returning *
       `,
       [
         productId,
         productName,
-        String(req.body.customerName ?? "").trim() || null,
-        String(req.body.customerPhone ?? "").trim() || null,
-        String(req.body.source ?? "whatsapp").trim() || "whatsapp",
+        customerName || null,
+        customerPhone || null,
+        String(req.body.source ?? "whatsapp").trim().slice(0,80) || "whatsapp",
         message,
+        customerEmail || null,
       ],
     );
 
@@ -2107,6 +2414,18 @@ app.post("/api/auth/logout-all", requireAuth, async (req, res, next) => {
 });
 
 app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError) {
+    const message = error.code === "LIMIT_FILE_SIZE"
+      ? "Image is too large. Choose an image smaller than 5 MB."
+      : error.message;
+    res.status(400).json({ error: message });
+    return;
+  }
+  if (error.message === "Upload a JPEG, PNG, WebP, GIF, or AVIF image.") {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+
   console.error(error);
   const message =
     process.env.NODE_ENV === "production"

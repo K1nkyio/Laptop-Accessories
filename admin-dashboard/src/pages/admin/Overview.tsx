@@ -38,7 +38,7 @@ export default function Overview() {
   const stats = [
     { label: "Total Products", value: String(products.length), change: "Live catalog", trend: "up", icon: Package, tone: "primary" },
     { label: "Out of Stock", value: String(products.filter((product) => product.stock <= 0).length), change: "Need restock", trend: "down", icon: AlertTriangle, tone: "destructive" },
-    { label: "Open Inquiries", value: String(inquiries.filter((inquiry) => inquiry.status !== "completed").length), change: "Awaiting follow-up", trend: "up", icon: MessageSquare, tone: "warning" },
+    { label: "Open Inquiries", value: String(inquiries.filter((inquiry) => inquiry.status !== "resolved").length), change: "Awaiting follow-up", trend: "up", icon: MessageSquare, tone: "warning" },
     { label: "Featured", value: String(products.filter((product) => product.is_featured).length + reviews.filter((review) => review.is_featured).length), change: "Storefront highlights", trend: "neutral", icon: Star, tone: "success" },
   ];
 

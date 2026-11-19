@@ -16,6 +16,7 @@ import {
   saveAdminProduct,
   uploadAdminImage,
   getStoredAdminAuth,
+  resolveAdminImageUrl,
   type AdminCategory,
   type AdminProduct,
 } from "../../lib/admin-api";
@@ -235,7 +236,7 @@ export default function Products() {
                   <td className="p-3">
                     <div className="flex items-center gap-3">
                       <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-muted">
-                        {product.image_url && <img src={product.image_url} alt="" className="h-full w-full object-cover" />}
+                        {product.image_url && <img src={resolveAdminImageUrl(product.image_url)} alt="" className="h-full w-full object-contain" />}
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5 truncate font-medium">
@@ -439,7 +440,7 @@ function ImageDropzone({ imageUrl, uploading, onUpload, onClear }: { imageUrl: s
     >
       {imageUrl ? (
         <div className="flex items-center gap-4">
-          <div className="h-24 w-24 overflow-hidden rounded-md bg-muted"><img src={imageUrl} alt="" className="h-full w-full object-cover" /></div>
+          <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-md bg-white p-2"><img src={resolveAdminImageUrl(imageUrl)} alt="" className="h-full w-full object-contain" /></div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-[13px] font-medium"><ImagePlus className="h-4 w-4" /> Product image selected</div>
             <p className="mt-1 truncate text-[12px] text-muted-foreground">{imageUrl}</p>

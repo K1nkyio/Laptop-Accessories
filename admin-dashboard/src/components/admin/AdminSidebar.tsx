@@ -11,6 +11,7 @@ import {
   Laptop,
   ChevronLeft,
   ShieldCheck,
+  PanelsTopLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -23,6 +24,7 @@ const items = [
   { to: "/admin/inquiries", label: "Inquiries", icon: MessageSquare },
   { to: "/admin/inventory", label: "Inventory", icon: Boxes },
   { to: "/admin/reviews", label: "Reviews", icon: Star },
+  { to: "/admin/store-content", label: "Store Content", icon: PanelsTopLeft },
 ];
 
 export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {

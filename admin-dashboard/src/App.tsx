@@ -16,6 +16,7 @@ import Inquiries from "./pages/admin/Inquiries";
 import Inventory from "./pages/admin/Inventory";
 import Reviews from "./pages/admin/Reviews";
 import Settings from "./pages/admin/Settings";
+import StoreContent from "./pages/admin/StoreContent";
 
 const queryClient = new QueryClient();
 
@@ -39,6 +40,7 @@ const App = () => (
               <Route path="inventory" element={<Inventory />} />
               <Route path="reviews" element={<Reviews />} />
               <Route path="settings" element={<Settings />} />
+              <Route path="store-content" element={<StoreContent />} />
               <Route path="security" element={<Security />} />
             </Route>
             <Route path="*" element={<NotFound />} />
