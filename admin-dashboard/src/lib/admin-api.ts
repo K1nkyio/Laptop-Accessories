@@ -1,3 +1,5 @@
+import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
+
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
 const ADMIN_AUTH_STORAGE_KEY = "techhub-admin-auth";
 let legacyAdminToken: string | null = null;
@@ -71,6 +73,20 @@ export interface AdminReview {
 export interface AdminAuthResponse {
   admin: { id: string; name: string; email: string; role: string };
   token?: string;
+  needsPasskeyEnrollment?: boolean;
+  requiresPasskeyEnrollment?: boolean;
+  mfaRequired?: boolean;
+  challenge?: string;
+  message?: string;
+}
+
+export interface AdminPasskey {
+  id: string;
+  name: string;
+  device_type: string;
+  backed_up: boolean;
+  created_at: string;
+  last_used_at: string | null;
 }
 
 export interface AdminAccount {
@@ -155,6 +171,66 @@ export async function loginAdmin(input: { email: string; password: string }) {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function getAdminPasskeyLoginOptions(email: string) {
+  return request<{ challengeId: string; options: PublicKeyCredentialRequestOptionsJSON }>("/api/admin/auth/passkeys/login/options", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function verifyAdminPasskeyLogin(input: { email: string; challengeId: string; response: AuthenticationResponseJSON }) {
+  return request<AdminAuthResponse>("/api/admin/auth/passkeys/login/verify", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function completeAdminTotpFallback(input: { challenge: string; code: string }) {
+  return request<AdminAuthResponse>("/api/admin/auth/totp/fallback", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getAdminPasskeyRegistrationOptions() {
+  return request<{ challengeId: string; options: PublicKeyCredentialCreationOptionsJSON }>("/api/admin/auth/passkeys/register/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function verifyAdminPasskeyRegistration(input: { challengeId: string; response: RegistrationResponseJSON; name: string }) {
+  return request<{ verified: boolean; enrolled: boolean }>("/api/admin/auth/passkeys/register/verify", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function fetchAdminPasskeys() {
+  const data = await request<{ passkeys: AdminPasskey[] }>("/api/admin/auth/passkeys");
+  return data.passkeys;
+}
+
+export async function removeAdminPasskey(id: string) {
+  return request<{ ok: true }>(`/api/admin/auth/passkeys/${id}`, { method: "DELETE" });
+}
+
+export async function setupAdminTotp() {
+  return request<{ secret: string; otpauthUrl: string }>("/api/admin/auth/totp/setup", { method: "POST", body: JSON.stringify({}) });
+}
+
+export async function verifyAdminTotp(code: string) {
+  return request<{ enabled: true; recoveryCodes: string[] }>("/api/admin/auth/totp/verify", { method: "POST", body: JSON.stringify({ code }) });
+}
+
+export async function fetchAdminTotpStatus() {
+  return request<{ enabled: boolean; recoveryCodesRemaining: number }>("/api/admin/auth/totp/status");
+}
+
+export async function disableAdminTotp(password: string) {
+  return request<{ ok: true }>("/api/admin/auth/totp/disable", { method: "POST", body: JSON.stringify({ password }) });
 }
 
 export async function registerAdmin(input: { name: string; email: string; password: string; role?: "admin" | "super_admin" }) {

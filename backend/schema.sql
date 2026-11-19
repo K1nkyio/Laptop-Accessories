@@ -91,16 +91,6 @@ create table if not exists admins (
   updated_at timestamptz not null default now()
 );
 
-update admins
-set role = 'super_admin'
-where id = (
-  select id
-  from admins
-  order by created_at asc
-  limit 1
-)
-and not exists (select 1 from admins where role = 'super_admin');
-
 create table if not exists password_reset_tokens (
   id uuid primary key default gen_random_uuid(),
   account_type text not null check (account_type in ('user', 'admin')),

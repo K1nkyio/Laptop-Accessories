@@ -6,6 +6,8 @@ import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "next-themes";
 import NotFound from "./pages/NotFound";
 import AdminLogin from "./pages/admin/AdminLogin";
+import PasskeyEnrollment from "./pages/admin/PasskeyEnrollment";
+import Security from "./pages/admin/Security";
 import AdminLayout from "./components/admin/AdminLayout";
 import Overview from "./pages/admin/Overview";
 import Products from "./pages/admin/Products";
@@ -27,6 +29,7 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Navigate to="/admin" replace />} />
             <Route path="/admin/login" element={<AdminLogin />} />
+            <Route path="/admin/enroll" element={<PasskeyEnrollment />} />
             <Route path="/admin" element={<AdminLayout />}>
               <Route index element={<Overview />} />
               <Route path="dashboard" element={<Overview />} />
@@ -36,6 +39,7 @@ const App = () => (
               <Route path="inventory" element={<Inventory />} />
               <Route path="reviews" element={<Reviews />} />
               <Route path="settings" element={<Settings />} />
+              <Route path="security" element={<Security />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

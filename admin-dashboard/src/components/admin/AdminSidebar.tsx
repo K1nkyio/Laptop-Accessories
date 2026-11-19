@@ -10,6 +10,7 @@ import {
   LogOut,
   Laptop,
   ChevronLeft,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -100,6 +101,20 @@ export function AdminSidebar({ onNavigate }: { onNavigate?: () => void }) {
 
       {/* Footer */}
       <div className="p-2 border-t border-sidebar-border space-y-0.5">
+        <NavLink
+          to="/admin/security"
+          onClick={onNavigate}
+          className={cn(
+            "flex items-center gap-3 px-3 h-9 rounded-md text-[13px] transition-colors",
+            location.pathname.startsWith("/admin/security")
+              ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+              : "hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground text-muted-foreground"
+          )}
+          title={collapsed ? "Security" : undefined}
+        >
+          <ShieldCheck className="h-4 w-4 shrink-0" />
+          {!collapsed && <span>Security</span>}
+        </NavLink>
         <NavLink
           to="/admin/settings"
           onClick={onNavigate}

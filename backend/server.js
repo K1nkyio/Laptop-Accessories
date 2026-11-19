@@ -8,8 +8,10 @@ import jwt from "jsonwebtoken";
 import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
+import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { createAuthRateLimiter } from "./security/auth-rate-limit.js";
 import { hashPassword, needsPasswordRehash, verifyPassword } from "./security/password-hash.js";
+import { assertTotpEncryptionKey, createRecoveryCodes, decryptTotpSecret, encryptTotpSecret, hashRecoveryCode, makeOtpAuthUrl, randomTotpSecret, verifyTotp } from "./security/totp.js";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -19,13 +21,14 @@ const { pool, query } = await import("./db.js");
 
 const port = Number(process.env.PORT ?? 4000);
 const jwtSecret = process.env.JWT_SECRET;
-const adminEmail = normalizeEmail(process.env.ADMIN_EMAIL ?? "");
-const adminPasswordHash = process.env.ADMIN_PASSWORD_HASH;
 const exposeDevResetTokens = process.env.NODE_ENV === "development" && process.env.EXPOSE_DEV_RESET_TOKENS === "true";
 const production = process.env.NODE_ENV === "production";
 const cookieSameSite = String(process.env.COOKIE_SAME_SITE ?? "lax").toLowerCase();
 const customerCookieName = production ? "__Host-store_session" : "store_session";
 const adminCookieName = production ? "__Host-admin_session" : "admin_session";
+const webauthnRpName = process.env.WEBAUTHN_RP_NAME ?? "TechHub Admin";
+const webauthnRpId = process.env.WEBAUTHN_RP_ID ?? "localhost";
+const webauthnOrigin = process.env.WEBAUTHN_ORIGIN ?? "http://localhost:8080";
 const uploadDir = path.join(__dirname, "uploads");
 fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({
@@ -44,6 +47,10 @@ const upload = multer({
 if (!jwtSecret) {
   throw new Error("JWT_SECRET is required");
 }
+if (production && (!process.env.WEBAUTHN_RP_ID || !process.env.WEBAUTHN_ORIGIN || !process.env.ADMIN_MFA_ENCRYPTION_KEY)) {
+  throw new Error("Production requires explicit WEBAUTHN_RP_ID, WEBAUTHN_ORIGIN, and ADMIN_MFA_ENCRYPTION_KEY configuration");
+}
+if (production) assertTotpEncryptionKey();
 
 if (jwtSecret.length < 48 || jwtSecret === "replace-this-with-a-long-random-secret") {
   throw new Error("JWT_SECRET must be a strong random value");
@@ -238,9 +245,9 @@ function clearSessionCookie(res, isAdmin = false) {
 }
 
 async function createBrowserSession(req, res, principal) {
-  const isAdmin = Boolean(principal.adminId || principal.envAdminEmail);
-  const lifetimeMs = isAdmin ? 8 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
-  const idleMs = isAdmin ? 30 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  const isAdmin = Boolean(principal.adminId);
+  const lifetimeMs = principal.adminEnrollmentOnly ? 15 * 60 * 1000 : isAdmin ? 8 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+  const idleMs = principal.adminEnrollmentOnly ? 10 * 60 * 1000 : isAdmin ? 30 * 60 * 1000 : 24 * 60 * 60 * 1000;
   const token = crypto.randomBytes(32).toString("base64url");
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const ipAddress = req.ip && /^[0-9a-f:.]+$/i.test(req.ip) ? req.ip : null;
@@ -248,10 +255,10 @@ async function createBrowserSession(req, res, principal) {
 
   await query(
     `
-      insert into auth_sessions (user_id, admin_id, env_admin_email, token_hash, expires_at, idle_expires_at, ip_address, user_agent)
-      values ($1, $2, $3, $4, now() + ($5 * interval '1 millisecond'), now() + ($6 * interval '1 millisecond'), $7, $8)
+      insert into auth_sessions (user_id, admin_id, env_admin_email, admin_enrollment_only, token_hash, expires_at, idle_expires_at, ip_address, user_agent)
+      values ($1, $2, null, $3, $4, now() + ($5 * interval '1 millisecond'), now() + ($6 * interval '1 millisecond'), $7, $8)
     `,
-    [principal.userId ?? null, principal.adminId ?? null, principal.envAdminEmail ?? null, tokenHash, lifetimeMs, idleMs, ipAddress, userAgent],
+    [principal.userId ?? null, principal.adminId ?? null, Boolean(principal.adminEnrollmentOnly), tokenHash, lifetimeMs, idleMs, ipAddress, userAgent],
   );
 
   appendSessionCookie(res, isAdmin ? adminCookieName : customerCookieName, token, Math.floor(lifetimeMs / 1000));
@@ -304,23 +311,11 @@ async function loadAdminSession(token) {
       from admins a
       where s.admin_id = a.id and s.token_hash = $1 and s.revoked_at is null
         and s.idle_expires_at > now() and s.expires_at > now()
-      returning s.id as session_id, a.id, a.name, a.email, a.role
+      returning s.id as session_id, s.admin_enrollment_only, a.id, a.name, a.email, a.role
     `,
     [tokenHash],
   );
-  if (rows[0]) return { ...rows[0], role: rows[0].role ?? "admin" };
-
-  const envSession = await query(
-    `
-      update auth_sessions
-      set last_seen_at = now(), idle_expires_at = least(expires_at, now() + interval '30 minutes')
-      where env_admin_email = $2 and token_hash = $1 and revoked_at is null
-        and idle_expires_at > now() and expires_at > now()
-      returning id as session_id, env_admin_email as email
-    `,
-    [tokenHash, adminEmail],
-  );
-  return envSession.rows[0] ? { ...envSession.rows[0], id: "env-admin", name: "Super Admin", role: "super_admin" } : null;
+  return rows[0] ? { ...rows[0], role: rows[0].role ?? "admin" } : null;
 }
 
 function decodeGoogleCredential(credential) {
@@ -365,8 +360,14 @@ function verifyAdminBearer(req, res, next) {
       return;
     }
 
-    req.admin = payload;
-    next();
+    query("select id, name, email, role, passkey_enrolled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [payload.sub]).then(({ rows }) => {
+      if (!rows[0] || !rows[0].passkey_enrolled_at || !rows[0].has_passkey) {
+        res.status(403).json({ error: "Passkey enrollment is required", code: "PASSKEY_ENROLLMENT_REQUIRED" });
+        return;
+      }
+      req.admin = { ...payload, sub: rows[0].id, email: rows[0].email, role: rows[0].role, name: rows[0].name };
+      next();
+    }).catch(next);
   } catch (_error) {
     res.status(401).json({ error: "Invalid or expired admin session" });
   }
@@ -379,23 +380,50 @@ function requireAdmin(req, res, next) {
     return;
   }
 
-  loadAdminSession(token).then((session) => {
+  loadAdminSession(token).then(async (session) => {
     if (!session) {
       verifyAdminBearer(req, res, next);
       return;
     }
-    if (!["admin", "super_admin"].includes(session.role)) {
+    if (session.admin_enrollment_only) {
+      res.status(403).json({ error: "Complete passkey enrollment before using the dashboard", code: "PASSKEY_ENROLLMENT_REQUIRED" });
+      return;
+    }
+    const { rows } = await query("select id, name, email, role, passkey_enrolled_at, exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey from admins where id = $1", [session.id]);
+    if (!rows[0] || !rows[0].passkey_enrolled_at || !rows[0].has_passkey) {
+      res.status(403).json({ error: "Passkey enrollment is required", code: "PASSKEY_ENROLLMENT_REQUIRED" });
+      return;
+    }
+    if (!["admin", "super_admin"].includes(rows[0].role)) {
       res.status(403).json({ error: "Admin access required" });
       return;
     }
     req.admin = {
-      sub: session.id,
-      email: session.email,
-      role: session.role,
+      sub: rows[0].id,
+      email: rows[0].email,
+      role: rows[0].role,
+      name: rows[0].name,
       sessionId: session.session_id,
     };
     next();
   }).catch(next);
+}
+
+function requirePasskeyRegistration(req, res, next) {
+  const token = parseCookies(req)[adminCookieName];
+  if (token) {
+    loadAdminSession(token).then((session) => {
+      if (!session) { res.status(401).json({ error: "Admin session required" }); return; }
+      if (session.admin_enrollment_only) {
+        req.admin = { sub: session.id, email: session.email, role: session.role, name: session.name, sessionId: session.session_id, enrollmentOnly: true };
+        next();
+        return;
+      }
+      requireAdmin(req, res, next);
+    }).catch(next);
+    return;
+  }
+  requireAdmin(req, res, next);
 }
 
 function requireSuperAdmin(req, res, next) {
@@ -505,57 +533,321 @@ app.post("/api/admin/auth/login", rateLimitAuth, async (req, res, next) => {
     }
 
     const { rows } = await query(
-      "select id, name, email, password_hash, role from admins where email = $1",
+      `select id, name, email, password_hash, role, passkey_enrolled_at, totp_secret_ciphertext, totp_enabled_at,
+        exists(select 1 from admin_passkeys p where p.admin_id = admins.id) as has_passkey
+       from admins where email = $1`,
       [email],
     );
     const adminRow = rows[0];
-    const fallbackMatchesEmail =
-      adminEmail &&
-      crypto.timingSafeEqual(
-        Buffer.from(email.padEnd(Math.max(email.length, adminEmail.length))),
-        Buffer.from(adminEmail.padEnd(Math.max(email.length, adminEmail.length))),
-      );
-    const passwordHash = adminRow?.password_hash ?? (fallbackMatchesEmail ? adminPasswordHash : dummyPasswordHash);
-    const matchesPassword = await verifyPassword(password, passwordHash ?? dummyPasswordHash);
-
-    if ((!adminRow && !fallbackMatchesEmail) || !matchesPassword) {
+    const matchesPassword = await verifyPassword(password, adminRow?.password_hash ?? dummyPasswordHash);
+    if (!adminRow || !matchesPassword) {
       await writeSecurityEvent(req, "admin.login_failed");
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
 
-    if (adminRow && needsPasswordRehash(adminRow.password_hash)) {
+    if (needsPasswordRehash(adminRow.password_hash)) {
       const upgradedHash = await hashPassword(password);
       await query("update admins set password_hash = $2, updated_at = now() where id = $1", [adminRow.id, upgradedHash]);
     }
 
-    const admin = adminRow
-      ? publicAdmin(adminRow)
-      : { id: "env-admin", name: "Super Admin", email: adminEmail, role: "super_admin" };
+    const admin = publicAdmin(adminRow);
+    if (adminRow.passkey_enrolled_at && adminRow.has_passkey && adminRow.totp_enabled_at) {
+      const token = crypto.randomBytes(32).toString("base64url");
+      await query("delete from admin_totp_challenges where expires_at <= now() or consumed_at is not null");
+      await query("insert into admin_totp_challenges(admin_id, token_hash, expires_at) values ($1, $2, now() + interval '5 minutes')", [adminRow.id, resetTokenHash(token)]);
+      await writeSecurityEvent(req, "admin.totp_fallback_challenge_created", { adminId: adminRow.id });
+      res.json({ mfaRequired: true, challenge: token, admin });
+      return;
+    }
+    if (adminRow.passkey_enrolled_at && adminRow.has_passkey) {
+      await writeSecurityEvent(req, "admin.password_login_blocked_passkey_required", { adminId: adminRow.id });
+      res.status(401).json({ error: "Use your passkey to sign in, or enable TOTP for password fallback" });
+      return;
+    }
 
-    await createBrowserSession(req, res, adminRow ? { adminId: adminRow.id } : { envAdminEmail: adminEmail });
-    await writeSecurityEvent(req, "admin.login_succeeded", adminRow ? { adminId: adminRow.id } : {});
+    await createBrowserSession(req, res, { adminId: adminRow.id, adminEnrollmentOnly: true });
+    await writeSecurityEvent(req, "admin.passkey_enrollment_required", { adminId: adminRow.id });
     clearAuthAttempts(req);
-    res.json(authResponse(req, { admin }, signAdminToken(admin)));
+    res.json({ admin, needsPasskeyEnrollment: true });
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/admin/auth/me", requireAdmin, async (req, res, next) => {
+app.post("/api/admin/auth/passkeys/login/options", rateLimitAuth, async (req, res, next) => {
   try {
-    if (req.admin.sub === "env-admin") {
-      res.json({ admin: { id: "env-admin", name: "Super Admin", email: req.admin.email, role: "super_admin" } });
+    const email = normalizeEmail(req.body.email);
+    if (!validEmail(email)) { res.status(400).json({ error: "Enter a valid email address" }); return; }
+    const { rows } = await query("select id, email, name from admins where email = $1 and passkey_enrolled_at is not null and exists(select 1 from admin_passkeys p where p.admin_id = admins.id)", [email]);
+    if (!rows[0]) { res.status(401).json({ error: "Passkey sign-in could not be started" }); return; }
+    const admin = rows[0];
+    const { rows: credentials } = await query("select credential_id, transports from admin_passkeys where admin_id = $1", [admin.id]);
+    if (!credentials.length) { res.status(401).json({ error: "Passkey sign-in could not be started" }); return; }
+    const options = await generateAuthenticationOptions({
+      rpID: webauthnRpId,
+      allowCredentials: credentials.map((credential) => ({ id: credential.credential_id, transports: credential.transports })),
+      userVerification: "required",
+    });
+    const challenge = crypto.randomUUID();
+    await query("delete from admin_webauthn_challenges where expires_at <= now() or consumed_at is not null");
+    await query("insert into admin_webauthn_challenges(id, admin_id, purpose, challenge, expires_at) values ($1, $2, 'authentication', $3, now() + interval '5 minutes')", [challenge, admin.id, options.challenge]);
+    res.json({ challengeId: challenge, options });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/passkeys/login/verify", rateLimitAuth, async (req, res, next) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    const challengeId = String(req.body.challengeId ?? "");
+    const { rows: challenges } = await query(
+      `update admin_webauthn_challenges set consumed_at = now()
+       where id = $1 and purpose = 'authentication' and consumed_at is null and expires_at > now()
+         and admin_id = (select id from admins where email = $2)
+       returning admin_id, challenge`,
+      [challengeId, email],
+    );
+    if (!challenges[0]) { res.status(401).json({ error: "Passkey challenge is invalid or expired" }); return; }
+    const { rows } = await query("select id, name, email, role, totp_enabled_at from admins where id = $1 and passkey_enrolled_at is not null and exists(select 1 from admin_passkeys p where p.admin_id = admins.id)", [challenges[0].admin_id]);
+    const adminRow = rows[0];
+    const { rows: credentials } = await query("select * from admin_passkeys where admin_id = $1 and credential_id = $2", [adminRow?.id, String(req.body.response?.id ?? "")]);
+    if (!adminRow || !credentials[0]) { res.status(401).json({ error: "Passkey sign-in failed" }); return; }
+    const passkey = credentials[0];
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response: req.body.response,
+        expectedChallenge: challenges[0].challenge,
+        expectedOrigin: webauthnOrigin,
+        expectedRPID: webauthnRpId,
+        credential: { id: passkey.credential_id, publicKey: new Uint8Array(passkey.public_key), counter: Number(passkey.counter), transports: passkey.transports },
+        requireUserVerification: true,
+      });
+    } catch (_error) {
+      await writeSecurityEvent(req, "admin.passkey_login_failed", { adminId: adminRow.id });
+      res.status(401).json({ error: "Passkey sign-in failed" });
       return;
     }
+    if (!verification.verified) { res.status(401).json({ error: "Passkey sign-in failed" }); return; }
+    await query("update admin_passkeys set counter = $2, last_used_at = now() where id = $1", [passkey.id, verification.authenticationInfo.newCounter]);
+    const admin = publicAdmin(adminRow);
+    await createBrowserSession(req, res, { adminId: admin.id });
+    await writeSecurityEvent(req, "admin.passkey_login_succeeded", { adminId: admin.id }, { passkeyId: passkey.id });
+    clearAuthAttempts(req);
+    res.json(authResponse(req, { admin }, signAdminToken(admin)));
+  } catch (error) { next(error); }
+});
 
-    const { rows } = await query("select id, name, email, role from admins where id = $1", [req.admin.sub]);
+app.post("/api/admin/auth/passkeys/register/options", rateLimitAuth, requirePasskeyRegistration, async (req, res, next) => {
+  try {
+    const { rows: admins } = await query("select id, name, email from admins where id = $1", [req.admin.sub]);
+    if (!admins[0]) { res.status(401).json({ error: "Admin account not found" }); return; }
+    const { rows: credentials } = await query("select credential_id, transports from admin_passkeys where admin_id = $1", [req.admin.sub]);
+    const options = await generateRegistrationOptions({
+      rpName: webauthnRpName,
+      rpID: webauthnRpId,
+      userID: Buffer.from(admins[0].id.replaceAll("-", ""), "hex"),
+      userName: admins[0].email,
+      userDisplayName: admins[0].name,
+      attestationType: "none",
+      excludeCredentials: credentials.map((credential) => ({ id: credential.credential_id, transports: credential.transports })),
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+      supportedAlgorithmIDs: [-7, -257],
+    });
+    const challengeId = crypto.randomUUID();
+    await query("delete from admin_webauthn_challenges where expires_at <= now() or consumed_at is not null");
+    await query("insert into admin_webauthn_challenges(id, admin_id, purpose, challenge, expires_at) values ($1, $2, 'registration', $3, now() + interval '5 minutes')", [challengeId, req.admin.sub, options.challenge]);
+    res.json({ challengeId, options });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/passkeys/register/verify", rateLimitAuth, requirePasskeyRegistration, async (req, res, next) => {
+  try {
+    const { rows: challenges } = await query(
+      `update admin_webauthn_challenges set consumed_at = now()
+       where id = $1 and admin_id = $2 and purpose = 'registration' and consumed_at is null and expires_at > now()
+       returning challenge`,
+      [String(req.body.challengeId ?? ""), req.admin.sub],
+    );
+    if (!challenges[0]) { res.status(400).json({ error: "Passkey registration challenge is invalid or expired" }); return; }
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: req.body.response,
+        expectedChallenge: challenges[0].challenge,
+        expectedOrigin: webauthnOrigin,
+        expectedRPID: webauthnRpId,
+        requireUserVerification: true,
+      });
+    } catch (_error) { res.status(400).json({ error: "Passkey registration could not be verified" }); return; }
+    if (!verification.verified || !verification.registrationInfo) { res.status(400).json({ error: "Passkey registration could not be verified" }); return; }
+    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+    const transports = Array.isArray(req.body.response?.response?.transports) ? req.body.response.response.transports : [];
+    const name = String(req.body.name ?? "Passkey").trim().slice(0, 80) || "Passkey";
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        `insert into admin_passkeys(admin_id, credential_id, public_key, counter, transports, device_type, backed_up, name)
+         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
+        [req.admin.sub, credential.id, Buffer.from(credential.publicKey), credential.counter, JSON.stringify(transports), credentialDeviceType, credentialBackedUp, name],
+      );
+      await client.query("update admins set passkey_enrolled_at = coalesce(passkey_enrolled_at, now()) where id = $1", [req.admin.sub]);
+      if (req.admin.enrollmentOnly) {
+        await client.query("update auth_sessions set admin_enrollment_only = false, expires_at = now() + interval '8 hours', idle_expires_at = now() + interval '30 minutes' where id = $1 and admin_id = $2 and revoked_at is null", [req.admin.sessionId, req.admin.sub]);
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => {});
+      if (error.code === "23505") { res.status(409).json({ error: "This passkey is already registered" }); return; }
+      throw error;
+    } finally { client.release(); }
+    await writeSecurityEvent(req, "admin.passkey_registered", { adminId: req.admin.sub }, { passkeyId: credential.id });
+    clearAuthAttempts(req);
+    res.json({ verified: true, enrolled: true });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/auth/passkeys", requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await query("select id, name, device_type, backed_up, created_at, last_used_at from admin_passkeys where admin_id = $1 order by created_at", [req.admin.sub]);
+    res.json({ passkeys: rows });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/admin/auth/passkeys/:id", requireAdmin, async (req, res, next) => {
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("select id from admins where id = $1 for update", [req.admin.sub]);
+      const { rows } = await client.query("select id from admin_passkeys where id = $1 and admin_id = $2", [req.params.id, req.admin.sub]);
+      if (!rows[0]) { await client.query("rollback"); res.status(404).json({ error: "Passkey not found" }); return; }
+      const { rows: countRows } = await client.query("select count(*)::int as count from admin_passkeys where admin_id = $1", [req.admin.sub]);
+      if (countRows[0].count <= 1) { await client.query("rollback"); res.status(400).json({ error: "Register another passkey before removing this one" }); return; }
+      await client.query("delete from admin_passkeys where id = $1", [req.params.id]);
+      await client.query("commit");
+    } catch (error) { await client.query("rollback").catch(() => {}); throw error; }
+    finally { client.release(); }
+    await writeSecurityEvent(req, "admin.passkey_removed", { adminId: req.admin.sub });
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/totp/setup", requireAdmin, async (req, res, next) => {
+  try {
+    const secret = randomTotpSecret();
+    const ciphertext = encryptTotpSecret(secret);
+    const { rows } = await query(
+      "update admins set totp_secret_ciphertext = $2, totp_enabled_at = null, totp_last_counter = -1 where id = $1 and totp_enabled_at is null returning email",
+      [req.admin.sub, ciphertext],
+    );
+    if (!rows[0]) { res.status(409).json({ error: "TOTP is already enabled. Disable it before setting up a new authenticator." }); return; }
+    await writeSecurityEvent(req, "admin.totp_setup_started", { adminId: req.admin.sub });
+    res.json({ secret, otpauthUrl: makeOtpAuthUrl(secret, rows[0].email) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/totp/verify", rateLimitAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await query("select totp_secret_ciphertext, totp_enabled_at from admins where id = $1", [req.admin.sub]);
+    if (!rows[0]?.totp_secret_ciphertext || rows[0].totp_enabled_at) { res.status(400).json({ error: "Start TOTP setup before verifying a code" }); return; }
+    const secret = decryptTotpSecret(rows[0].totp_secret_ciphertext);
+    const counter = verifyTotp(secret, req.body.code);
+    if (counter === null) { res.status(400).json({ error: "The authenticator code is invalid or expired" }); return; }
+    const codes = createRecoveryCodes();
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const enabled = await client.query("update admins set totp_enabled_at = now(), totp_last_counter = $2 where id = $1 and totp_enabled_at is null returning id", [req.admin.sub, counter]);
+      if (!enabled.rowCount) {
+        await client.query("rollback");
+        res.status(409).json({ error: "Authenticator setup changed. Start setup again." });
+        return;
+      }
+      for (const code of codes) {
+        await client.query("insert into admin_totp_recovery_codes(admin_id, code_hash) values ($1, $2)", [req.admin.sub, hashRecoveryCode(code)]);
+      }
+      await client.query("commit");
+    } catch (error) { await client.query("rollback").catch(() => {}); throw error; }
+    finally { client.release(); }
+    await writeSecurityEvent(req, "admin.totp_enabled", { adminId: req.admin.sub });
+    clearAuthAttempts(req);
+    res.json({ enabled: true, recoveryCodes: codes });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/auth/totp/status", requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await query("select totp_enabled_at from admins where id = $1", [req.admin.sub]);
+    const { rows: recovery } = await query("select count(*)::int as remaining from admin_totp_recovery_codes where admin_id = $1 and used_at is null", [req.admin.sub]);
+    res.json({ enabled: Boolean(rows[0]?.totp_enabled_at), recoveryCodesRemaining: recovery[0]?.remaining ?? 0 });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/totp/fallback", rateLimitAuth, async (req, res, next) => {
+  try {
+    const challenge = String(req.body.challenge ?? "");
+    const code = String(req.body.code ?? "");
+    const { rows: challenges } = await query(
+      `update admin_totp_challenges set consumed_at = now()
+       where token_hash = $1 and consumed_at is null and expires_at > now() returning admin_id`,
+      [resetTokenHash(challenge)],
+    );
+    if (!challenges[0]) { res.status(401).json({ error: "MFA challenge is invalid or expired" }); return; }
+    const { rows } = await query("select id, name, email, role, totp_secret_ciphertext from admins where id = $1 and totp_enabled_at is not null and passkey_enrolled_at is not null and exists(select 1 from admin_passkeys p where p.admin_id = admins.id)", [challenges[0].admin_id]);
+    const adminRow = rows[0];
+    if (!adminRow) { res.status(401).json({ error: "MFA verification failed" }); return; }
+    let accepted = false;
+    const secret = decryptTotpSecret(adminRow.totp_secret_ciphertext);
+    const counter = verifyTotp(secret, code);
+    if (counter !== null) {
+      const { rowCount } = await query("update admins set totp_last_counter = $2 where id = $1 and totp_last_counter < $2", [adminRow.id, counter]);
+      accepted = rowCount === 1;
+    } else if (/^[a-f0-9-]{16,40}$/i.test(code)) {
+      const { rowCount } = await query(
+        "update admin_totp_recovery_codes set used_at = now() where admin_id = $1 and code_hash = $2 and used_at is null",
+        [adminRow.id, hashRecoveryCode(code)],
+      );
+      accepted = rowCount === 1;
+    }
+    if (!accepted) {
+      await writeSecurityEvent(req, "admin.totp_fallback_failed", { adminId: adminRow.id });
+      res.status(401).json({ error: "MFA verification failed" });
+      return;
+    }
+    const admin = publicAdmin(adminRow);
+    await createBrowserSession(req, res, { adminId: admin.id });
+    await writeSecurityEvent(req, "admin.totp_fallback_succeeded", { adminId: admin.id });
+    clearAuthAttempts(req);
+    res.json(authResponse(req, { admin }, signAdminToken(admin)));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/admin/auth/totp/disable", rateLimitAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await query("select password_hash from admins where id = $1", [req.admin.sub]);
+    if (!rows[0] || !(await verifyPassword(String(req.body.password ?? ""), rows[0].password_hash))) {
+      res.status(401).json({ error: "Current password is invalid" });
+      return;
+    }
+    await query("update admins set totp_secret_ciphertext = null, totp_enabled_at = null, totp_last_counter = -1 where id = $1", [req.admin.sub]);
+    await query("delete from admin_totp_recovery_codes where admin_id = $1", [req.admin.sub]);
+    await writeSecurityEvent(req, "admin.totp_disabled", { adminId: req.admin.sub });
+    clearAuthAttempts(req);
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/admin/auth/me", requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await query("select id, name, email, role, passkey_enrolled_at, totp_enabled_at from admins where id = $1", [req.admin.sub]);
     if (!rows[0]) {
       res.status(404).json({ error: "Admin account not found" });
       return;
     }
 
-    res.json({ admin: publicAdmin(rows[0]) });
+    res.json({ admin: { ...publicAdmin(rows[0]), passkeyEnrolled: Boolean(rows[0].passkey_enrolled_at), totpEnabled: Boolean(rows[0].totp_enabled_at) } });
   } catch (error) {
     next(error);
   }
@@ -563,14 +855,12 @@ app.get("/api/admin/auth/me", requireAdmin, async (req, res, next) => {
 
 app.get("/api/admin/auth/sessions", requireAdmin, async (req, res, next) => {
   try {
-    const params = req.admin.sub === "env-admin" ? [adminEmail] : [req.admin.sub];
-    const filter = req.admin.sub === "env-admin" ? "env_admin_email = $1" : "admin_id = $1";
     const { rows } = await query(
       `select id, created_at, last_seen_at, expires_at, idle_expires_at, ip_address, user_agent,
-        (id = $${params.length + 1}) as current
-       from auth_sessions where ${filter} and revoked_at is null and expires_at > now() and idle_expires_at > now()
+        (id = $2) as current
+       from auth_sessions where admin_id = $1 and revoked_at is null and expires_at > now() and idle_expires_at > now()
        order by last_seen_at desc`,
-      [...params, req.admin.sessionId ?? null],
+      [req.admin.sub, req.admin.sessionId ?? null],
     );
     res.json({ sessions: rows });
   } catch (error) { next(error); }
@@ -579,9 +869,7 @@ app.get("/api/admin/auth/sessions", requireAdmin, async (req, res, next) => {
 app.delete("/api/admin/auth/sessions/:id", requireAdmin, async (req, res, next) => {
   try {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) { res.status(400).json({ error: "Invalid session id" }); return; }
-    const owner = req.admin.sub === "env-admin" ? "env_admin_email = $2" : "admin_id = $2";
-    const ownerValue = req.admin.sub === "env-admin" ? adminEmail : req.admin.sub;
-    const result = await query(`update auth_sessions set revoked_at = now() where id = $1 and ${owner} and revoked_at is null`, [req.params.id, ownerValue]);
+    const result = await query("update auth_sessions set revoked_at = now() where id = $1 and admin_id = $2 and revoked_at is null", [req.params.id, req.admin.sub]);
     res.json({ ok: true, revoked: result.rowCount > 0 });
   } catch (error) { next(error); }
 });
@@ -589,12 +877,6 @@ app.delete("/api/admin/auth/sessions/:id", requireAdmin, async (req, res, next) 
 app.post("/api/admin/auth/session/exchange", requireAdmin, async (req, res, next) => {
   try {
     if (req.admin.sessionId) {
-      res.json({ ok: true });
-      return;
-    }
-
-    if (req.admin.sub === "env-admin" && adminEmail) {
-      await createBrowserSession(req, res, { envAdminEmail: adminEmail });
       res.json({ ok: true });
       return;
     }
@@ -630,12 +912,8 @@ app.post("/api/admin/auth/logout", async (req, res, next) => {
 
 app.post("/api/admin/auth/logout-all", requireAdmin, async (req, res, next) => {
   try {
-    if (req.admin.sub === "env-admin") {
-      await query("update auth_sessions set revoked_at = now() where env_admin_email = $1 and revoked_at is null", [adminEmail]);
-    } else {
-      await query("update auth_sessions set revoked_at = now() where admin_id = $1 and revoked_at is null", [req.admin.sub]);
-    }
-    await writeSecurityEvent(req, "admin.logout_all", req.admin.sub === "env-admin" ? {} : { adminId: req.admin.sub });
+    await query("update auth_sessions set revoked_at = now() where admin_id = $1 and revoked_at is null", [req.admin.sub]);
+    await writeSecurityEvent(req, "admin.logout_all", { adminId: req.admin.sub });
     clearSessionCookie(res, true);
     res.json({ ok: true });
   } catch (error) {
@@ -644,12 +922,7 @@ app.post("/api/admin/auth/logout-all", requireAdmin, async (req, res, next) => {
 });
 
 app.get("/api/admin/auth/bootstrap", async (_req, res, next) => {
-  try {
-    const { rows } = await query("select count(*)::int as count from admins");
-    res.json({ needsAdmin: rows[0].count === 0 && !adminEmail });
-  } catch (error) {
-    next(error);
-  }
+  res.json({ needsAdmin: false, provisioning: "protected_cli" });
 });
 
 app.get("/api/settings", async (_req, res, next) => {
@@ -695,25 +968,12 @@ app.patch("/api/admin/settings", requireSuperAdmin, async (req, res, next) => {
   }
 });
 
-app.post("/api/admin/auth/register", rateLimitAuth, async (req, res, next) => {
+app.post("/api/admin/auth/register", rateLimitAuth, requireSuperAdmin, async (req, res, next) => {
   try {
-    const { rows } = await query("select count(*)::int as count from admins");
-    if (rows[0].count > 0 || adminEmail) {
-      requireSuperAdmin(req, res, next);
-      return;
-    }
-    next();
-  } catch (error) { next(error); }
-}, async (req, res, next) => {
-  try {
-    const { rows: countRows } = await query("select count(*)::int as count from admins");
-    const hasAdmins = countRows[0].count > 0;
-    const hasAdminAuthority = hasAdmins || Boolean(adminEmail);
-
     const name = String(req.body.name ?? "").trim();
     const email = normalizeEmail(req.body.email);
     const password = String(req.body.password ?? "");
-    const role = hasAdminAuthority && req.body.role === "super_admin" ? "super_admin" : hasAdminAuthority ? "admin" : "super_admin";
+    const role = req.body.role === "super_admin" ? "super_admin" : "admin";
 
     if (!name || !email || !password) {
       res.status(400).json({ error: "Name, email, and password are required" });
@@ -736,10 +996,8 @@ app.post("/api/admin/auth/register", rateLimitAuth, async (req, res, next) => {
       [name, email, passwordHash, role],
     );
     const admin = publicAdmin(rows[0]);
-    await createBrowserSession(req, res, { adminId: admin.id });
-    await writeSecurityEvent(req, "admin.registered", { adminId: admin.id });
-    clearAuthAttempts(req);
-    res.status(201).json(authResponse(req, { admin }, signAdminToken(admin)));
+    await writeSecurityEvent(req, "admin.registered", { adminId: admin.id }, { role });
+    res.status(201).json({ admin, requiresPasskeyEnrollment: true, message: "Account created. The new administrator must sign in and enroll a passkey before dashboard access." });
   } catch (error) {
     if (error.code === "23505") {
       res.status(409).json({ error: "An admin with that email already exists" });

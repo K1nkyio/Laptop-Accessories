@@ -95,7 +95,7 @@ export default function Settings() {
     const formData = new FormData(event.currentTarget);
 
     try {
-      await registerAdmin({
+      const result = await registerAdmin({
         name: String(formData.get("adminName") ?? ""),
         email: String(formData.get("adminEmail") ?? ""),
         password: String(formData.get("adminPassword") ?? ""),
@@ -104,7 +104,7 @@ export default function Settings() {
       event.currentTarget.reset();
       setNewAdminRole("admin");
       await loadAdmins();
-      setMessage("Admin account created.");
+      setMessage(result.message ?? "Admin account created. Passkey enrollment is required at first sign in.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not create admin account");
     }

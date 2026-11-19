@@ -4,13 +4,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { KeyRound, Laptop, Loader2, ShieldCheck } from "lucide-react";
-import { confirmAdminPasswordReset, loginAdmin, registerAdmin, requestAdminPasswordReset, storeAdminAuth } from "../../lib/admin-api";
+import { startAuthentication } from "@simplewebauthn/browser";
+import { completeAdminTotpFallback, confirmAdminPasswordReset, getAdminPasskeyLoginOptions, loginAdmin, requestAdminPasswordReset, storeAdminAuth, verifyAdminPasskeyLogin } from "../../lib/admin-api";
 
 export default function AdminLogin() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [email, setEmail] = useState("");
+  const [mfaChallenge, setMfaChallenge] = useState("");
   const [resetMode, setResetMode] = useState<"request" | "confirm" | null>(null);
   const [resetMessage, setResetMessage] = useState("");
 
@@ -26,17 +28,51 @@ export default function AdminLogin() {
         email: String(formData.get("email") ?? ""),
         password: String(formData.get("password") ?? ""),
       };
-      const auth =
-        mode === "register"
-          ? await registerAdmin({
-              name: String(formData.get("name") ?? ""),
-              ...input,
-            })
-          : await loginAdmin(input);
+      const auth = await loginAdmin(input);
+      if (auth.mfaRequired && auth.challenge) {
+        setMfaChallenge(auth.challenge);
+        return;
+      }
       storeAdminAuth(auth);
+      if (auth.needsPasskeyEnrollment) {
+        navigate("/admin/enroll", { replace: true });
+        return;
+      }
       navigate("/admin", { replace: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not sign in");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasskeyLogin = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const { challengeId, options } = await getAdminPasskeyLoginOptions(email);
+      const response = await startAuthentication({ optionsJSON: options });
+      const auth = await verifyAdminPasskeyLogin({ email, challengeId, response });
+      storeAdminAuth(auth);
+      navigate("/admin", { replace: true });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Passkey sign in failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTotpFallback = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    setLoading(true);
+    const code = String(new FormData(event.currentTarget).get("code") ?? "");
+    try {
+      const auth = await completeAdminTotpFallback({ challenge: mfaChallenge, code });
+      storeAdminAuth(auth);
+      navigate("/admin", { replace: true });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "MFA verification failed");
     } finally {
       setLoading(false);
     }
@@ -116,21 +152,26 @@ export default function AdminLogin() {
           <div className="mb-6 flex h-11 w-11 items-center justify-center rounded-xl border border-primary/15 bg-primary/10 text-primary">
             <ShieldCheck className="h-5 w-5" />
           </div>
-          <h2 className="text-[24px] font-semibold tracking-tight">{mode === "login" ? "Admin sign in" : "Create admin account"}</h2>
+          <h2 className="text-[24px] font-semibold tracking-tight">Administrator sign in</h2>
           <p className="mt-1 text-[13px] text-muted-foreground">
-            {mode === "login" ? "Enter your credentials to access the dashboard." : "Create the first admin account, or add another while signed in."}
+            Sign in with your authorized administrator account to access the dashboard.
           </p>
 
-          <form onSubmit={handleSubmit} className="mt-8 space-y-4">
-            {mode === "register" ? (
+          {mfaChallenge ? (
+            <form onSubmit={handleTotpFallback} className="mt-8 space-y-4">
+              <p className="text-[13px] text-muted-foreground">Enter your authenticator code or an unused recovery code.</p>
               <div className="space-y-1.5">
-                <Label htmlFor="name" className="text-[12px]">Name</Label>
-                <Input id="name" name="name" type="text" required placeholder="Admin name" autoComplete="name" />
+                <Label htmlFor="mfa-code" className="text-[12px]">Verification code</Label>
+                <Input id="mfa-code" name="code" autoComplete="one-time-code" required autoFocus />
               </div>
-            ) : null}
+              {error ? <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">{error}</div> : null}
+              <Button type="submit" className="h-10 w-full" disabled={loading}>{loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}Verify and sign in</Button>
+              <button type="button" onClick={() => { setMfaChallenge(""); setError(""); }} className="w-full text-[12px] text-muted-foreground hover:text-foreground">Back to sign in</button>
+            </form>
+          ) : <form onSubmit={handleSubmit} className="mt-8 space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="email" className="text-[12px]">Email</Label>
-              <Input id="email" name="email" type="email" required placeholder="admin@techhub.ke" autoComplete="username" />
+              <Input id="email" name="email" type="email" required placeholder="admin@techhub.ke" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="password" className="text-[12px]">Password</Label>
@@ -145,25 +186,23 @@ export default function AdminLogin() {
 
             <Button type="submit" className="h-10 w-full" disabled={loading}>
               {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {mode === "login" ? "Sign in to dashboard" : "Create admin account"}
+              Password and TOTP fallback
+            </Button>
+            <Button type="button" variant="outline" className="h-10 w-full" disabled={loading || !email} onClick={() => void handlePasskeyLogin()}>
+              Sign in with passkey
             </Button>
 
-            <div className="flex items-center justify-between pt-1 text-[12px] text-muted-foreground">
-              <button type="button" onClick={() => setMode(mode === "login" ? "register" : "login")} className="hover:text-foreground">
-                {mode === "login" ? "Create an admin account" : "Back to sign in"}
+            <div className="flex items-center justify-end pt-1 text-[12px] text-muted-foreground">
+              <button type="button" onClick={() => setResetMode((value) => (value ? null : "request"))} className="inline-flex items-center gap-1 hover:text-foreground">
+                <KeyRound className="h-3.5 w-3.5" />
+                Forgot password?
               </button>
-              {mode === "login" ? (
-                <button type="button" onClick={() => setResetMode((value) => (value ? null : "request"))} className="inline-flex items-center gap-1 hover:text-foreground">
-                  <KeyRound className="h-3.5 w-3.5" />
-                  Forgot password?
-                </button>
-              ) : null}
             </div>
 
             <div className="pt-2 text-center text-[11px] text-muted-foreground">
               Protected area. Admin sessions expire automatically.
             </div>
-          </form>
+          </form>}
 
           {resetMode ? (
             <div className="mt-5 border-t border-border pt-5">

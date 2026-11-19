@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=18.18"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "bootstrap:super-admin": "node scripts/bootstrap-super-admin.js",
     "test": "node --test"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.0",
     "argon2": "^0.45.2",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
